@@ -1,0 +1,1110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Poker Tracker</title>
+  <script>tailwind={config:{corePlugins:{preflight:false}}}</script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg:     #0d1117;
+      --bg2:    #161b22;
+      --bg3:    #21262d;
+      --border: #30363d;
+      --red:    #e53e3e;
+      --red-dk: #c53030;
+      --text:   #e6edf3;
+      --text2:  #8b949e;
+      --green:  #3fb950;
+      --neg:    #f85149;
+    }
+    *, *::before, *::after { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    body { background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, sans-serif; min-height: 100vh; overflow-x: hidden; }
+    #app, #page { max-width: 100vw; overflow-x: hidden; }
+    .card  { background: var(--bg2); border: 1px solid var(--border); border-radius: 1rem; }
+    .card2 { background: var(--bg3); border: 1px solid var(--border); border-radius: 0.75rem; }
+    .inp   { background: var(--bg3); border: 2px solid var(--border); color: var(--text); border-radius: 0.75rem; outline: none; transition: border-color 0.15s; }
+    .inp:focus { border-color: var(--red); }
+    .btn-red   { background: var(--red); color: #fff; border-radius: 0.75rem; font-weight: 700; border: none; cursor: pointer; transition: all 0.15s; }
+    .btn-red:hover { background: var(--red-dk); }
+    .btn-red:active { transform: scale(0.97); }
+    .btn-ghost { background: var(--bg3); color: var(--text2); border: 1px solid var(--border); border-radius: 0.75rem; font-weight: 600; cursor: pointer; transition: all 0.15s; }
+    .btn-ghost:hover { border-color: var(--text2); }
+    .nav-bar { background: var(--bg2); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 40; }
+    .nav-btn { color: var(--text2); border-radius: 0.5rem; font-weight: 600; border: none; background: transparent; cursor: pointer; transition: all 0.15s; font-size: 0.7rem; padding: 0.5rem 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .nav-btn.active { background: var(--red); color: #fff; }
+    .player-pill { background: var(--bg3); border: 2px solid var(--border); border-radius: 0.75rem; color: var(--text2); font-weight: 600; cursor: pointer; transition: all 0.15s; }
+    .player-pill.selected { border-color: var(--red); background: rgba(229,62,62,0.15); color: var(--text); }
+    .sign-btn { background: var(--bg3); border: 2px solid var(--border); color: var(--text2); border-radius: 0.75rem; font-weight: 900; font-size: 1.2rem; cursor: pointer; transition: all 0.15s; display: flex; align-items: center; justify-content: center; }
+    .sign-btn.neg { border-color: var(--neg); background: rgba(248,81,73,0.12); color: var(--neg); }
+    .pos     { color: var(--green) !important; }
+    .neg-clr { color: var(--neg) !important; }
+    .neutral { color: var(--text2) !important; }
+    .fade-in { animation: fadeIn 0.2s ease; }
+    @keyframes fadeIn { from { opacity:0; transform:translateY(5px); } to { opacity:1; transform:translateY(0); } }
+    .toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); z-index:9999; padding:12px 24px; border-radius:12px; font-weight:600; font-size:15px; box-shadow:0 8px 24px rgba(0,0,0,0.5); transition:opacity 0.3s; pointer-events:none; color:#fff; white-space:nowrap; }
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance:none; }
+    ::-webkit-scrollbar { width:4px; }
+    ::-webkit-scrollbar-track { background:var(--bg); }
+    ::-webkit-scrollbar-thumb { background:var(--border); border-radius:2px; }
+    .divider { border-top: 1px solid var(--border); }
+    .award-card { border-left: 3px solid var(--red); }
+    .live-pulse { animation: pulse 2s infinite; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+    .color-swatch { transition: transform 0.15s, border-color 0.15s; }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+// ── CONFIG ────────────────────────────────────────────────────────────────────
+const SUPABASE_URL      = 'https://xkdfcqanytgzdqrkjlqg.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhrZGZjcWFueXRnemRxcmtqbHFnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4MjQ1NzksImV4cCI6MjA5ODQwMDU3OX0.aayD6SKis2gX4Vw14xMcdyBJpKWX3CfePg3VO4Sy0JQ';
+const PASSWORD    = '0000';
+const BUYIN_VALUE = 200;
+const NICKNAMES   = { Vikrant:'Tiger', Dhal:'Shark', Rathore:'Silverback Gorilla', Alok:'Mountain Goat', Totala:'Rhino' };
+const COLOR_PRESETS = [
+  '#f59e0b','#3b82f6','#a855f7','#10b981','#f97316',
+  '#ec4899','#06b6d4','#84cc16','#14b8a6','#ef4444',
+  '#8b5cf6','#f43f5e','#22d3ee','#a3e635','#fb923c',
+  '#64748b','#d97706','#7c3aed'
+];
+
+// ── DYNAMIC PLAYER STATE (loaded from DB, fallback to hardcoded) ──────────────
+let ALL_PLAYER_ROWS = [];
+let PLAYERS = ['Vikrant','Dhal','Rathore','Alok','Totala','SV','Suneet','Lavish','Savya'];
+let PLAYER_COLORS = {
+  Vikrant:'#f59e0b', Dhal:'#3b82f6', Rathore:'#a855f7', Alok:'#10b981',
+  Totala:'#f97316', SV:'#ec4899', Suneet:'#06b6d4', Lavish:'#84cc16', Savya:'#14b8a6'
+};
+
+// ── SUPABASE ──────────────────────────────────────────────────────────────────
+const SUPABASE_CONFIGURED = SUPABASE_URL !== 'YOUR_SUPABASE_URL';
+let db = null;
+try {
+  if (SUPABASE_CONFIGURED && typeof supabase !== 'undefined')
+    db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+} catch(e) { console.warn('Supabase init failed:', e); }
+
+// ── STATE ─────────────────────────────────────────────────────────────────────
+let currentPage = location.hash.slice(1) || 'login';
+let authed = sessionStorage.getItem('poker_auth') === '1';
+let activeSessionData = null;
+let initialRedirectDone = false;
+if (authed && currentPage === 'login') currentPage = 'leaderboard';
+
+window.addEventListener('hashchange', () => {
+  const page = location.hash.slice(1) || 'login';
+  if (!authed && page !== 'login') { navigate('login'); return; }
+  currentPage = page;
+  render();
+});
+
+function navigate(page) { location.hash = '#' + page; }
+
+// ── TOAST ─────────────────────────────────────────────────────────────────────
+function showToast(msg, color = '#3fb950') {
+  const t = document.createElement('div');
+  t.className = 'toast'; t.style.background = color; t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => { t.style.opacity='0'; setTimeout(()=>t.remove(),300); }, 2200);
+}
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+function displayName(p) { const n=NICKNAMES[p]; return n?`${p} "${n}"`:p; }
+function fmtBi(v)  { const s=v>0?'+':''; return `${s}${Number(v).toFixed(2)}`; }
+function fmtRs(v)  {
+  const rs=v*BUYIN_VALUE, s=rs>0?'+':rs<0?'-':'';
+  return `${s}₹${Math.abs(rs).toLocaleString('en-IN')}`;
+}
+function colorCls(v) { return v>0?'pos':v<0?'neg-clr':'neutral'; }
+function todayISO() {
+  const d=new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function formatDate(s) {
+  return new Date(s+'T00:00:00').toLocaleDateString('en-IN',{weekday:'short',day:'numeric',month:'short',year:'numeric'});
+}
+function formatDateShort(s) {
+  return new Date(s+'T00:00:00').toLocaleDateString('en-IN',{day:'numeric',month:'short'});
+}
+function notConfiguredMsg(what) {
+  return `<p style="color:#f59e0b;text-align:center;padding:3rem 1rem">Connect Supabase to see ${what}.</p>`;
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+async function loadPlayers() {
+  if (!db) return;
+  const { data } = await db.from('players').select('*').order('created_at');
+  if (data && data.length > 0) {
+    ALL_PLAYER_ROWS = data;
+    PLAYERS = data.filter(p => p.active).map(p => p.name);
+    data.forEach(p => { PLAYER_COLORS[p.name] = p.color; });
+  }
+}
+
+async function checkActiveSession() {
+  if (!db) return;
+  const { data } = await db.from('active_session').select('*, active_session_buyins(*)').limit(1);
+  activeSessionData = (data && data.length > 0) ? data[0] : null;
+}
+
+async function init() {
+  if (authed) {
+    await Promise.all([loadPlayers(), checkActiveSession()]);
+  }
+  render();
+}
+
+// ── RENDER ────────────────────────────────────────────────────────────────────
+function render() {
+  const app = document.getElementById('app');
+  if (!authed) { app.innerHTML = renderLogin(); bindLogin(); return; }
+
+  // On first render after login, redirect to active session if one exists
+  if (!initialRedirectDone) {
+    initialRedirectDone = true;
+    if (activeSessionData && currentPage !== 'active-session') {
+      currentPage = 'active-session';
+      history.replaceState(null, '', '#active-session');
+    }
+  }
+
+  const isProfile = currentPage.startsWith('profile-');
+  app.innerHTML = renderNav() + '<div id="page" class="fade-in"></div>';
+  const page = document.getElementById('page');
+  if      (currentPage === 'leaderboard')    renderLeaderboard(page);
+  else if (currentPage === 'new-session')    renderNewSession(page);
+  else if (currentPage === 'active-session') renderActiveSession(page);
+  else if (currentPage === 'history')        renderHistory(page);
+  else if (currentPage === 'awards')         renderAwards(page);
+  else if (currentPage === 'players')        renderPlayersPage(page);
+  else if (isProfile)                        renderProfile(page, currentPage.slice(8));
+  else renderLeaderboard(page);
+  bindNav();
+}
+
+// ── LOGIN ─────────────────────────────────────────────────────────────────────
+function renderLogin() {
+  return `
+  <div style="min-height:100vh;background:var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;padding:1rem">
+    <div style="width:100%;max-width:360px">
+      <div style="text-align:center;margin-bottom:2rem">
+        <div style="font-size:4rem;margin-bottom:0.75rem">🃏</div>
+        <h1 style="font-size:1.875rem;font-weight:900;color:var(--text);margin:0">Poker Tracker</h1>
+        <p style="color:var(--text2);margin-top:0.25rem">Home game · Members only</p>
+      </div>
+      <div class="card" style="padding:1.5rem">
+        <label style="display:block;color:var(--text2);font-size:0.875rem;font-weight:600;margin-bottom:0.5rem">Password</label>
+        <input id="pw" type="password" inputmode="numeric" maxlength="10"
+          class="inp" style="width:100%;font-size:1.5rem;letter-spacing:0.3em;padding:1rem;text-align:center;margin-bottom:1rem"
+          placeholder="••••" autofocus />
+        <button id="login-btn" class="btn-red" style="width:100%;font-size:1.125rem;padding:1rem">Enter</button>
+        <p id="pw-err" style="display:none;color:var(--neg);text-align:center;font-size:0.875rem;margin-top:0.75rem">Wrong password, try again</p>
+      </div>
+    </div>
+  </div>`;
+}
+function bindLogin() {
+  const btn=document.getElementById('login-btn'), pw=document.getElementById('pw'), err=document.getElementById('pw-err');
+  async function tryLogin() {
+    if (pw.value === PASSWORD) {
+      authed = true;
+      sessionStorage.setItem('poker_auth', '1');
+      btn.textContent = 'Loading…'; btn.disabled = true;
+      await Promise.all([loadPlayers(), checkActiveSession()]);
+      navigate('leaderboard');
+    } else {
+      err.style.display = 'block'; pw.value = ''; pw.focus();
+    }
+  }
+  btn.addEventListener('click', tryLogin);
+  pw.addEventListener('keydown', e => { if (e.key === 'Enter') tryLogin(); });
+}
+
+// ── NAV ───────────────────────────────────────────────────────────────────────
+function renderNav() {
+  const active = currentPage.startsWith('profile-') ? 'leaderboard'
+               : currentPage === 'active-session'   ? 'new-session'
+               : currentPage;
+  const tabs = [
+    { id:'leaderboard', label:'🏆 Board' },
+    { id:'new-session',  label: activeSessionData ? '🎮 Live' : '➕ New' },
+    { id:'history',      label:'📋 History' },
+    { id:'awards',       label:'🎖️ Awards' },
+    { id:'players',      label:'👥 Players' },
+  ];
+  return `<div class="nav-bar">
+    <div style="max-width:672px;margin:0 auto;padding:0.4rem 0.25rem;display:flex;gap:0.2rem">
+      ${tabs.map(t=>`<button data-nav="${t.id}" class="nav-btn ${active===t.id?'active':''}">${t.label}</button>`).join('')}
+    </div>
+  </div>`;
+}
+function bindNav() {
+  document.querySelectorAll('.nav-btn').forEach(b => b.addEventListener('click', () => {
+    const dest = b.dataset.nav;
+    if (dest === 'new-session' && activeSessionData) { navigate('active-session'); return; }
+    navigate(dest);
+  }));
+}
+
+// ── LEADERBOARD ───────────────────────────────────────────────────────────────
+async function renderLeaderboard(el) {
+  el.innerHTML = `
+  <div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
+    <h2 style="font-size:1.5rem;font-weight:900;margin-bottom:1rem">All-Time Leaderboard</h2>
+    <div id="lb-body" style="margin-bottom:1.5rem"><p style="color:var(--text2);text-align:center;padding:3rem 0">Loading...</p></div>
+    <div class="card" style="padding:1rem;margin-bottom:1rem">
+      <p style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">All Players — Cumulative Buy-ins</p>
+      <div style="position:relative;height:220px"><canvas id="combined-chart"></canvas></div>
+    </div>
+  </div>`;
+
+  if (!db) { document.getElementById('lb-body').innerHTML = notConfiguredMsg('leaderboard'); return; }
+
+  const [{data:results},{data:sessions}] = await Promise.all([
+    db.from('session_results').select('player_name, buyins, session_id'),
+    db.from('sessions').select('id, date').order('date',{ascending:true})
+  ]);
+
+  // Use all known players (DB rows if loaded, else fallback)
+  const allNames = ALL_PLAYER_ROWS.length > 0
+    ? ALL_PLAYER_ROWS.map(p => p.name)
+    : PLAYERS;
+
+  const totals = {};
+  allNames.forEach(p => totals[p] = 0);
+  (results||[]).forEach(r => {
+    if (totals[r.player_name] !== undefined) totals[r.player_name] += Number(r.buyins);
+    else totals[r.player_name] = Number(r.buyins); // catch any legacy names
+  });
+  const sorted = Object.entries(totals).sort((a,b) => b[1]-a[1]);
+  const medals = ['🥇','🥈','🥉'];
+
+  document.getElementById('lb-body').innerHTML = sorted.map(([player,total],i) => {
+    const rs=total*BUYIN_VALUE, rsSign=rs>0?'+':rs<0?'-':'';
+    const retired = ALL_PLAYER_ROWS.find(p=>p.name===player&&!p.active);
+    return `<button onclick="navigate('profile-${player}')"
+      style="width:100%;text-align:left;display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;margin-bottom:0.5rem;${i===0?'border-color:#f59e0b':''}"
+      class="card">
+      <div style="font-size:1.4rem;width:2rem;text-align:center">${medals[i]||`<span style="color:var(--text2);font-weight:700;font-size:0.85rem">${i+1}</span>`}</div>
+      <div style="width:0.625rem;height:0.625rem;border-radius:50%;background:${PLAYER_COLORS[player]||'#888'};flex-shrink:0"></div>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;color:${retired?'var(--text2)':'var(--text)'}">${player}${retired?' <span style="font-size:0.65rem;color:var(--text2);font-weight:400">(retired)</span>':''}</div>
+        <div style="font-size:0.75rem;color:var(--text2)">${fmtBi(total)} buy-ins</div>
+      </div>
+      <div style="text-align:right">
+        <div style="font-size:1.1rem;font-weight:900" class="${colorCls(total)}">${rsSign}₹${Math.abs(rs).toLocaleString('en-IN')}</div>
+      </div>
+      <div style="color:var(--text2)">›</div>
+    </button>`;
+  }).join('');
+
+  if (!sessions||sessions.length===0) return;
+  const bySession = {};
+  (results||[]).forEach(r=>{ if(!bySession[r.session_id]) bySession[r.session_id]={}; bySession[r.session_id][r.player_name]=Number(r.buyins); });
+  const labels = sessions.map(s=>formatDateShort(s.date));
+  const chartPlayers = ALL_PLAYER_ROWS.length > 0 ? ALL_PLAYER_ROWS.map(p=>p.name) : PLAYERS;
+  const datasets = chartPlayers.map(player => {
+    let running=0;
+    const data = sessions.map(s=>{ running+=(bySession[s.id]?.[player]||0); return running; });
+    if (data.every(v=>v===0)) return null;
+    return { label:player, data, borderColor:PLAYER_COLORS[player]||'#888', backgroundColor:'transparent', borderWidth:2, pointRadius:2, tension:0.3 };
+  }).filter(Boolean);
+
+  const ctx = document.getElementById('combined-chart')?.getContext('2d');
+  if (ctx && datasets.length > 0) {
+    new Chart(ctx, {
+      type:'line', data:{labels, datasets},
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        interaction:{mode:'index', intersect:false},
+        plugins:{ legend:{display:true, position:'bottom', labels:{color:'#8b949e',font:{size:10},boxWidth:10,padding:8}} },
+        scales:{
+          x:{ticks:{color:'#8b949e',font:{size:9},maxTicksLimit:6}, grid:{color:'#21262d'}},
+          y:{ticks:{color:'#8b949e',font:{size:9}}, grid:{color:'#21262d'}}
+        }
+      }
+    });
+  }
+}
+
+// ── NEW SESSION (start flow) ──────────────────────────────────────────────────
+function renderNewSession(el) {
+  if (activeSessionData) { navigate('active-session'); return; }
+
+  el.innerHTML = `
+  <div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
+    <h2 style="font-size:1.5rem;font-weight:900;margin-bottom:0.25rem">Start Session</h2>
+    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">Select players and starting buy-ins</p>
+
+    <div class="card" style="padding:1rem;margin-bottom:1rem">
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Date</label>
+      <input type="date" id="session-date" value="${todayISO()}"
+        class="inp" style="display:block;width:100%;padding:0.75rem 1rem;font-size:1rem;font-weight:600;color:var(--text)" />
+    </div>
+
+    <div class="card" style="padding:1rem;margin-bottom:1rem">
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">Who's playing?</label>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.5rem" id="player-select">
+        ${PLAYERS.map(p=>`<button data-player="${p}" class="player-pill" style="padding:0.75rem 0.5rem;font-size:0.875rem;text-align:center">${p}</button>`).join('')}
+      </div>
+    </div>
+
+    <div id="starting-section" class="card" style="display:none;padding:1rem;margin-bottom:1.25rem">
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.25rem">Starting Buy-ins</label>
+      <p style="font-size:0.75rem;color:var(--text2);margin-bottom:0.75rem">Default is 1. Increase if someone is starting with more.</p>
+      <div id="starting-inputs" style="display:flex;flex-direction:column;gap:0.6rem"></div>
+    </div>
+
+    <button id="start-btn" class="btn-red" style="display:none;width:100%;font-size:1.125rem;padding:1rem">Start Session →</button>
+  </div>`;
+
+  bindNewSessionStart();
+}
+
+function bindNewSessionStart() {
+  const selected = new Set();
+
+  function updateStarting() {
+    const section = document.getElementById('starting-section');
+    const startBtn = document.getElementById('start-btn');
+    const inputs = document.getElementById('starting-inputs');
+    if (selected.size === 0) { section.style.display='none'; startBtn.style.display='none'; return; }
+    section.style.display='block'; startBtn.style.display='block';
+
+    inputs.innerHTML = [...selected].map(p => `
+      <div style="display:flex;align-items:center;gap:0.75rem">
+        <div style="width:0.5rem;height:0.5rem;border-radius:50%;background:${PLAYER_COLORS[p]||'#888'};flex-shrink:0"></div>
+        <div style="flex:1;font-weight:600;font-size:0.9rem;color:var(--text)">${p}</div>
+        <button type="button" data-minus="${p}" class="btn-ghost" style="width:2.5rem;height:2.5rem;font-size:1.2rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0">−</button>
+        <div id="sbi-${p}" style="width:1.25rem;text-align:center;font-weight:900;font-size:1.1rem;color:var(--text)">1</div>
+        <button type="button" data-plus="${p}" class="btn-ghost" style="width:2.5rem;height:2.5rem;font-size:1.2rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0">+</button>
+        <div style="font-size:0.8rem;color:var(--text2);width:3.5rem;text-align:right;flex-shrink:0">₹<span id="sbi-rs-${p}">200</span></div>
+      </div>`).join('');
+
+    document.querySelectorAll('[data-plus]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const p=btn.dataset.plus, el=document.getElementById('sbi-'+p);
+        const v=parseInt(el.textContent)+1; el.textContent=v;
+        document.getElementById('sbi-rs-'+p).textContent=(v*BUYIN_VALUE).toLocaleString('en-IN');
+      });
+    });
+    document.querySelectorAll('[data-minus]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const p=btn.dataset.minus, el=document.getElementById('sbi-'+p);
+        const v=Math.max(1,parseInt(el.textContent)-1); el.textContent=v;
+        document.getElementById('sbi-rs-'+p).textContent=(v*BUYIN_VALUE).toLocaleString('en-IN');
+      });
+    });
+  }
+
+  document.querySelectorAll('.player-pill').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const p=btn.dataset.player;
+      if (selected.has(p)) { selected.delete(p); btn.classList.remove('selected'); }
+      else { selected.add(p); btn.classList.add('selected'); }
+      updateStarting();
+    });
+  });
+
+  document.getElementById('start-btn').addEventListener('click', async () => {
+    if (selected.size === 0) { showToast('Select at least one player','#e53e3e'); return; }
+    const date=document.getElementById('session-date').value;
+    if (!date) { showToast('Pick a date','#e53e3e'); return; }
+    if (!db)   { showToast('Supabase not configured','#e53e3e'); return; }
+
+    const btn=document.getElementById('start-btn');
+    btn.textContent='Starting…'; btn.disabled=true;
+
+    const {data:session,error:sErr}=await db.from('active_session').insert({date}).select().single();
+    if (sErr) { showToast('Error starting session','#e53e3e'); btn.textContent='Start Session →'; btn.disabled=false; return; }
+
+    const rows=[...selected].map(p=>({
+      active_session_id:session.id,
+      player_name:p,
+      buyins:parseInt(document.getElementById('sbi-'+p)?.textContent||'1')
+    }));
+    const {error:bErr}=await db.from('active_session_buyins').insert(rows);
+    if (bErr) { showToast('Error saving buy-ins','#e53e3e'); btn.textContent='Start Session →'; btn.disabled=false; return; }
+
+    const {data:full}=await db.from('active_session').select('*, active_session_buyins(*)').eq('id',session.id).single();
+    activeSessionData=full;
+    navigate('active-session');
+  });
+}
+
+// ── ACTIVE SESSION (live tracking) ────────────────────────────────────────────
+async function renderActiveSession(el) {
+  if (!activeSessionData) {
+    await checkActiveSession();
+    if (!activeSessionData) { navigate('new-session'); return; }
+  }
+  showTrackingView(el);
+}
+
+function showTrackingView(el) {
+  const s=activeSessionData;
+  const buyins=(s.active_session_buyins||[]).slice().sort((a,b)=>a.player_name.localeCompare(b.player_name));
+
+  el.innerHTML=`
+  <div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.25rem">
+      <h2 style="font-size:1.5rem;font-weight:900;margin:0">🎮 Session Live</h2>
+      <div style="display:flex;align-items:center;gap:0.5rem">
+        <div style="width:0.5rem;height:0.5rem;border-radius:50%;background:var(--green)" class="live-pulse"></div>
+        <span style="font-size:0.75rem;color:var(--green);font-weight:600">LIVE</span>
+      </div>
+    </div>
+    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:0.25rem">${formatDate(s.date)}</p>
+    <p style="color:var(--text2);font-size:0.8rem;margin-bottom:1.25rem">Tap + when someone rebuys · Updates sync across all phones</p>
+
+    <div class="card" style="padding:1rem;margin-bottom:1rem">
+      <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">Buy-ins Taken</div>
+      <div style="display:flex;flex-direction:column;gap:0.75rem">
+        ${buyins.map(b=>`
+          <div style="display:flex;align-items:center;gap:0.75rem">
+            <div style="width:0.5rem;height:0.5rem;border-radius:50%;background:${PLAYER_COLORS[b.player_name]||'#888'};flex-shrink:0"></div>
+            <div style="flex:1;font-weight:600;color:var(--text)">${b.player_name}</div>
+            <button type="button" data-minus-id="${b.id}" class="btn-ghost" style="width:2.5rem;height:2.5rem;font-size:1.2rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0">−</button>
+            <div id="lbi-${b.id}" style="width:1.5rem;text-align:center;font-weight:900;font-size:1.1rem;color:var(--text)">${b.buyins}</div>
+            <button type="button" data-plus-id="${b.id}" class="btn-red" style="width:2.5rem;height:2.5rem;font-size:1.2rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;border-radius:0.5rem;flex-shrink:0">+</button>
+            <div style="font-size:0.8rem;color:var(--text2);width:3.5rem;text-align:right;flex-shrink:0">₹<span id="lrs-${b.id}">${(b.buyins*BUYIN_VALUE).toLocaleString('en-IN')}</span></div>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <button id="end-btn" class="btn-red" style="width:100%;font-size:1.125rem;padding:1rem;margin-bottom:0.75rem">End Session & Enter Final Chips →</button>
+    <button id="cancel-btn" class="btn-ghost" style="width:100%;font-size:0.875rem;padding:0.75rem">Cancel Session</button>
+  </div>`;
+
+  // +/- live buttons
+  document.querySelectorAll('[data-plus-id]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id=btn.dataset.plusId;
+      const el=document.getElementById('lbi-'+id);
+      const newVal=parseInt(el.textContent)+1;
+      el.textContent=newVal;
+      document.getElementById('lrs-'+id).textContent=(newVal*BUYIN_VALUE).toLocaleString('en-IN');
+      const row=activeSessionData.active_session_buyins.find(b=>b.id===id);
+      if (row) row.buyins=newVal;
+      await db.from('active_session_buyins').update({buyins:newVal}).eq('id',id);
+    });
+  });
+  document.querySelectorAll('[data-minus-id]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const id=btn.dataset.minusId;
+      const el=document.getElementById('lbi-'+id);
+      const cur=parseInt(el.textContent);
+      if (cur<=1) return;
+      const newVal=cur-1;
+      el.textContent=newVal;
+      document.getElementById('lrs-'+id).textContent=(newVal*BUYIN_VALUE).toLocaleString('en-IN');
+      const row=activeSessionData.active_session_buyins.find(b=>b.id===id);
+      if (row) row.buyins=newVal;
+      await db.from('active_session_buyins').update({buyins:newVal}).eq('id',id);
+    });
+  });
+
+  document.getElementById('end-btn').addEventListener('click', () => showEndView(document.getElementById('page')));
+
+  document.getElementById('cancel-btn').addEventListener('click', ()=>{
+    const btn=document.getElementById('cancel-btn');
+    btn.outerHTML=`
+      <div id="cancel-confirm" style="display:flex;gap:0.5rem;align-items:center">
+        <span style="flex:1;font-size:0.8rem;color:var(--text2)">Cancel session? All tracking lost.</span>
+        <button id="cancel-yes" class="btn-red" style="padding:0.625rem 1rem;font-size:0.875rem">Yes</button>
+        <button id="cancel-no" class="btn-ghost" style="padding:0.625rem 1rem;font-size:0.875rem">No</button>
+      </div>`;
+    document.getElementById('cancel-no').addEventListener('click',()=>showTrackingView(document.getElementById('page')));
+    document.getElementById('cancel-yes').addEventListener('click', async ()=>{
+      await db.from('active_session').delete().eq('id',activeSessionData.id);
+      activeSessionData=null;
+      navigate('new-session');
+    });
+  });
+}
+
+function showEndView(el) {
+  const s=activeSessionData;
+  const buyins=(s.active_session_buyins||[]).slice().sort((a,b)=>a.player_name.localeCompare(b.player_name));
+  const totalBoughtBi=buyins.reduce((a,b)=>a+b.buyins,0);
+
+  el.innerHTML=`
+  <div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
+    <h2 style="font-size:1.5rem;font-weight:900;margin-bottom:0.25rem">Final Buy-in Counts</h2>
+    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">Enter each player's final buy-in count (e.g. 2.5) — net is calculated automatically</p>
+
+    <div class="card" style="padding:1rem;margin-bottom:1rem">
+      <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">
+        Total in play: ${totalBoughtBi} buy-ins · Final counts must also sum to ${totalBoughtBi}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:0.75rem">
+        ${buyins.map(b=>`
+          <div style="display:flex;align-items:center;gap:0.5rem">
+            <div style="width:0.5rem;height:0.5rem;border-radius:50%;background:${PLAYER_COLORS[b.player_name]||'#888'};flex-shrink:0"></div>
+            <div style="width:3.5rem;flex-shrink:0;font-weight:600;font-size:0.85rem;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.player_name}</div>
+            <div style="font-size:0.68rem;color:var(--text2);flex-shrink:0;white-space:nowrap">${b.buyins}bi in</div>
+            <input type="text" inputmode="decimal" id="final-${b.id}" data-id="${b.id}" data-bought="${b.buyins}"
+              class="chip-input inp" style="flex:1;min-width:0;padding:0.75rem 0.5rem;font-size:1rem;font-weight:700;text-align:center" placeholder="0" />
+            <div id="net-${b.id}" style="width:3.75rem;text-align:right;font-size:0.75rem;font-weight:700;flex-shrink:0;color:var(--text2)">—</div>
+          </div>`).join('')}
+      </div>
+    </div>
+
+    <div id="end-hint" style="display:none;font-size:0.875rem;padding:0.75rem 1rem;border-radius:0.75rem;margin-bottom:0.75rem;background:rgba(245,158,11,0.1);color:#f59e0b;border:1px solid rgba(245,158,11,0.25)">
+      ⚠️ <span id="end-hint-text"></span>
+    </div>
+
+    <button id="save-end-btn" class="btn-red" style="width:100%;font-size:1.125rem;padding:1rem;margin-bottom:0.75rem">Save Session</button>
+    <button id="back-to-tracking" class="btn-ghost" style="width:100%;font-size:0.875rem;padding:0.75rem">← Back to Tracking</button>
+  </div>`;
+
+  function calcNets() {
+    let totalFinal=0; let allFilled=true;
+    buyins.forEach(b => {
+      const inp=document.getElementById('final-'+b.id);
+      const finalBi=parseFloat(inp?.value)||0;
+      if (!inp?.value.trim()) allFilled=false;
+      const netBi=finalBi-b.buyins;
+      totalFinal+=finalBi;
+      const netEl=document.getElementById('net-'+b.id);
+      if (inp?.value.trim()) {
+        netEl.textContent=`${netBi>0?'+':''}${netBi.toFixed(2)}bi`;
+        netEl.className=colorCls(netBi);
+        netEl.style.cssText='width:3.75rem;text-align:right;font-size:0.75rem;font-weight:700;flex-shrink:0';
+      } else {
+        netEl.textContent='—'; netEl.style.color='var(--text2)';
+      }
+    });
+    const diff=totalFinal-totalBoughtBi;
+    const hint=document.getElementById('end-hint'), ht=document.getElementById('end-hint-text');
+    if (Math.abs(diff)>0.01 && allFilled) {
+      hint.style.display='block';
+      ht.textContent=`Final counts sum to ${totalFinal.toFixed(2)} but should be ${totalBoughtBi} — recheck`;
+    } else hint.style.display='none';
+    return diff;
+  }
+
+  document.querySelectorAll('.chip-input').forEach(inp=>inp.addEventListener('input',calcNets));
+  document.getElementById('back-to-tracking').addEventListener('click',()=>showTrackingView(document.getElementById('page')));
+
+  document.getElementById('save-end-btn').addEventListener('click', async () => {
+    for (const b of buyins) {
+      if (!document.getElementById('final-'+b.id)?.value.trim()) { showToast('Enter final count for all players','#e53e3e'); return; }
+    }
+    const diff=calcNets();
+    if (Math.abs(diff)>0.01) { showToast(`Counts don't sum to ${totalBoughtBi} — recheck`,'#e53e3e'); return; }
+
+    const results=buyins.map(b=>{
+      const finalBi=parseFloat(document.getElementById('final-'+b.id).value)||0;
+      const netBi=Math.round((finalBi-b.buyins)*100)/100;
+      return {player_name:b.player_name, buyins:netBi};
+    });
+
+    const btn=document.getElementById('save-end-btn');
+    btn.textContent='Saving…'; btn.disabled=true;
+
+    const {data:session,error:sErr}=await db.from('sessions').insert({date:activeSessionData.date}).select().single();
+    if (sErr) { showToast('Error saving','#e53e3e'); btn.textContent='Save Session'; btn.disabled=false; return; }
+    const {error:rErr}=await db.from('session_results').insert(results.map(r=>({session_id:session.id,...r})));
+    if (rErr) { showToast('Error saving results','#e53e3e'); btn.textContent='Save Session'; btn.disabled=false; return; }
+
+    await db.from('active_session').delete().eq('id',activeSessionData.id);
+    activeSessionData=null;
+    showToast('Session saved! 🎉');
+    setTimeout(()=>navigate('history'),800);
+  });
+}
+
+// ── SESSION HISTORY ───────────────────────────────────────────────────────────
+async function renderHistory(el) {
+  el.innerHTML = `<div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
+    <h2 style="font-size:1.5rem;font-weight:900;margin-bottom:1rem">Session History</h2>
+    <div id="history-body"><p style="color:var(--text2);text-align:center;padding:3rem 0">Loading…</p></div>
+  </div>`;
+  await loadHistory();
+}
+
+async function loadHistory() {
+  const body=document.getElementById('history-body'); if(!body) return;
+  if (!db) { body.innerHTML=notConfiguredMsg('history'); return; }
+  const {data:sessions,error}=await db.from('sessions').select('*, session_results(*)').order('date',{ascending:false});
+  if (error) { body.innerHTML=`<p style="color:var(--neg)">Error loading history.</p>`; return; }
+  if (!sessions||sessions.length===0) {
+    body.innerHTML=`<div style="text-align:center;padding:3rem 1rem;color:var(--text2)">No sessions yet.<br><span style="font-size:0.875rem">Start one with the ➕ New tab.</span></div>`; return;
+  }
+  body.innerHTML=sessions.map(s=>renderSessionCard(s)).join('');
+  bindHistoryActions();
+}
+
+function renderSessionCard(s, editing=false) {
+  const results=(s.session_results||[]).sort((a,b)=>b.buyins-a.buyins);
+  const rows=results.map(r=>{
+    const v=Number(r.buyins), rs=v*BUYIN_VALUE, sign=rs>0?'+':rs<0?'-':'';
+    if (editing) return `<div style="display:flex;align-items:center;gap:0.5rem;padding:0.375rem 0">
+      <div style="width:5rem;flex-shrink:0;font-size:0.875rem;font-weight:600;color:var(--text)">${r.player_name}</div>
+      <input type="text" inputmode="decimal" class="edit-input inp" style="flex:1;min-width:0;padding:0.5rem;font-size:0.875rem;font-weight:700;text-align:center"
+        data-result-id="${r.id}" value="${r.buyins}" />
+      <div style="width:4.5rem;text-align:right;font-size:0.75rem;color:var(--text2)">${v.toFixed(2)} bi</div>
+    </div>`;
+    return `<div style="display:flex;align-items:center;justify-content:space-between;padding:0.375rem 0">
+      <span style="font-size:0.875rem;color:var(--text)">${r.player_name}</span>
+      <div style="text-align:right">
+        <span class="${colorCls(v)}" style="font-size:0.875rem;font-weight:700">${v>0?'+':''}${v.toFixed(2)} bi</span>
+        <span style="font-size:0.75rem;color:var(--text2);margin-left:0.5rem">${sign}₹${Math.abs(rs).toLocaleString('en-IN')}</span>
+      </div>
+    </div>`;
+  }).join('');
+
+  const btns=editing?`
+    <div style="display:flex;gap:0.5rem;margin-top:0.75rem">
+      <button data-save-session="${s.id}" class="btn-red" style="flex:1;padding:0.625rem;font-size:0.875rem">Save</button>
+      <button data-cancel-session="${s.id}" class="btn-ghost" style="flex:1;padding:0.625rem;font-size:0.875rem">Cancel</button>
+    </div>`:`
+    <div id="btns-${s.id}" style="display:flex;gap:0.5rem;margin-top:0.75rem">
+      <button data-edit-session="${s.id}" class="btn-ghost" style="flex:1;padding:0.625rem;font-size:0.875rem">Edit</button>
+      <button data-delete-session="${s.id}" style="padding:0.625rem 1rem;font-size:0.875rem;font-weight:600;border-radius:0.75rem;border:1px solid rgba(248,81,73,0.25);color:var(--neg);background:rgba(248,81,73,0.05);cursor:pointer;transition:all 0.15s">Delete</button>
+    </div>`;
+
+  return `<div id="session-card-${s.id}" class="card" style="padding:1rem;margin-bottom:0.75rem">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
+      <div style="font-weight:900;color:var(--text)">${formatDate(s.date)}</div>
+      <div style="font-size:0.75rem;color:var(--text2)">${results.length} players</div>
+    </div>
+    <div style="border-top:1px solid var(--border)">${rows}</div>
+    ${btns}
+  </div>`;
+}
+
+function bindHistoryActions() {
+  document.querySelectorAll('[data-edit-session]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const id=btn.dataset.editSession;
+      const {data:s}=await db.from('sessions').select('*, session_results(*)').eq('id',id).single();
+      document.getElementById('session-card-'+id).outerHTML=renderSessionCard(s,true);
+      bindHistoryActions();
+    });
+  });
+  document.querySelectorAll('[data-cancel-session]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const id=btn.dataset.cancelSession;
+      const {data:s}=await db.from('sessions').select('*, session_results(*)').eq('id',id).single();
+      document.getElementById('session-card-'+id).outerHTML=renderSessionCard(s,false);
+      bindHistoryActions();
+    });
+  });
+  document.querySelectorAll('[data-save-session]').forEach(btn=>{
+    btn.addEventListener('click', async ()=>{
+      const id=btn.dataset.saveSession;
+      const inputs=document.querySelectorAll(`#session-card-${id} .edit-input`);
+      let sum=0; const updates=[];
+      inputs.forEach(inp=>{ const v=parseFloat(inp.value)||0; sum+=v; updates.push({id:inp.dataset.resultId,buyins:v}); });
+      if (Math.abs(sum)>0.01) { showToast(`Sum must be 0 (now ${sum>0?'+':''}${sum.toFixed(2)})`, '#e53e3e'); return; }
+      btn.textContent='Saving…';
+      for (const u of updates) await db.from('session_results').update({buyins:u.buyins}).eq('id',u.id);
+      showToast('Updated!');
+      await loadHistory();
+    });
+  });
+  document.querySelectorAll('[data-delete-session]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const id=btn.dataset.deleteSession;
+      const btnsDiv=document.getElementById('btns-'+id);
+      if (!btnsDiv) return;
+      btnsDiv.innerHTML=`
+        <span style="flex:1;font-size:0.8rem;color:var(--text2);display:flex;align-items:center">Sure? This can't be undone.</span>
+        <button data-confirm-delete="${id}" class="btn-red" style="padding:0.625rem 1rem;font-size:0.875rem">Yes, Delete</button>
+        <button data-cancel-delete="${id}" class="btn-ghost" style="padding:0.625rem 1rem;font-size:0.875rem">Cancel</button>`;
+      btnsDiv.querySelector(`[data-cancel-delete]`).addEventListener('click', async ()=>{
+        const {data:s}=await db.from('sessions').select('*, session_results(*)').eq('id',id).single();
+        document.getElementById('session-card-'+id).outerHTML=renderSessionCard(s,false);
+        bindHistoryActions();
+      });
+      btnsDiv.querySelector(`[data-confirm-delete]`).addEventListener('click', async ()=>{
+        const {error}=await db.from('sessions').delete().eq('id',id);
+        if (error) { showToast('Delete failed: '+error.message,'#e53e3e'); return; }
+        showToast('Deleted','#6b7280');
+        await loadHistory();
+      });
+    });
+  });
+}
+
+// ── PLAYER PROFILE ────────────────────────────────────────────────────────────
+async function renderProfile(el, player) {
+  el.innerHTML=`
+  <div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
+    <button onclick="history.back()" class="btn-ghost" style="font-size:0.875rem;padding:0.5rem 1rem;margin-bottom:1.25rem;display:inline-flex;align-items:center;gap:0.5rem">← Back</button>
+    <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1.5rem">
+      <div style="width:1rem;height:1rem;border-radius:50%;background:${PLAYER_COLORS[player]||'#888'};flex-shrink:0"></div>
+      <div>
+        <h2 style="font-size:1.5rem;font-weight:900;margin:0;color:var(--text)">${displayName(player)}</h2>
+        <p style="color:var(--text2);font-size:0.875rem;margin:0">Player Profile</p>
+      </div>
+    </div>
+    <div id="profile-body"><p style="color:var(--text2);text-align:center;padding:3rem 0">Loading…</p></div>
+  </div>`;
+
+  if (!db) { document.getElementById('profile-body').innerHTML=notConfiguredMsg('profile'); return; }
+
+  const [{data:playerResults},{data:allSessions}]=await Promise.all([
+    db.from('session_results').select('buyins,session_id').eq('player_name',player),
+    db.from('sessions').select('id,date').order('date',{ascending:true})
+  ]);
+
+  if (!playerResults||playerResults.length===0) {
+    document.getElementById('profile-body').innerHTML=`<p style="color:var(--text2);text-align:center;padding:3rem 0">${player} hasn't played any sessions yet.</p>`;
+    return;
+  }
+
+  const dateMap={}; (allSessions||[]).forEach(s=>dateMap[s.id]=s.date);
+  const sessions=playerResults
+    .map(r=>({buyins:Number(r.buyins),date:dateMap[r.session_id]||''}))
+    .filter(r=>r.date)
+    .sort((a,b)=>a.date.localeCompare(b.date));
+
+  const bi=sessions.map(s=>s.buyins);
+  const total=bi.reduce((a,b)=>a+b,0);
+  const count=bi.length;
+  const wins=bi.filter(v=>v>0).length;
+  const winRate=Math.round((wins/count)*100);
+  const bigWin=Math.max(...bi);
+  const bigLoss=Math.min(...bi);
+
+  let streak=0, streakType='';
+  for (let i=bi.length-1;i>=0;i--) {
+    const isW=bi[i]>0;
+    if (streak===0){streakType=isW?'win':'loss';streak=1;}
+    else if((streakType==='win'&&isW)||(streakType==='loss'&&!isW))streak++;
+    else break;
+  }
+  const streakLabel=streak===1?(streakType==='win'?'1 Win':'1 Loss'):`${streak} ${streakType==='win'?'Wins':'Losses'} in a row`;
+  const streakColor=streakType==='win'?'var(--green)':'var(--neg)';
+  const streakIcon=streakType==='win'?'🔥':'❄️';
+
+  let running=0;
+  const cumulative=sessions.map(s=>{running+=s.buyins;return{date:s.date,value:running};});
+
+  function statBox(label,value,cls){
+    return `<div class="card2" style="padding:0.75rem">
+      <div style="font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.25rem">${label}</div>
+      <div class="${cls}" style="font-size:1.25rem;font-weight:900">${value}</div>
+    </div>`;
+  }
+
+  document.getElementById('profile-body').innerHTML=`
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;margin-bottom:1rem">
+      ${statBox('Total (buy-ins)',fmtBi(total),colorCls(total))}
+      ${statBox('Total (₹)',fmtRs(total),colorCls(total))}
+      ${statBox('Sessions',count,'neutral')}
+      ${statBox('Win Rate',`${winRate}%`,winRate>=50?'pos':'neg-clr')}
+      ${statBox('Best Session',`+${bigWin.toFixed(2)} bi`,'pos')}
+      ${statBox('Worst Session',`${bigLoss.toFixed(2)} bi`,'neg-clr')}
+    </div>
+    <div class="card" style="padding:0.875rem;margin-bottom:1rem;display:flex;align-items:center;gap:0.75rem">
+      <div style="font-size:1.75rem">${streakIcon}</div>
+      <div>
+        <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2)">Current Streak</div>
+        <div style="font-weight:900;font-size:1.1rem;color:${streakColor}">${streakLabel}</div>
+      </div>
+    </div>
+    <div class="card" style="padding:1rem">
+      <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">Cumulative Buy-ins Over Time</div>
+      <div style="position:relative;height:180px"><canvas id="profile-chart"></canvas></div>
+    </div>`;
+
+  const ctx=document.getElementById('profile-chart')?.getContext('2d');
+  if (ctx&&cumulative.length>0) {
+    new Chart(ctx,{
+      type:'line',
+      data:{
+        labels:cumulative.map(d=>formatDateShort(d.date)),
+        datasets:[{
+          data:cumulative.map(d=>d.value),
+          borderColor:PLAYER_COLORS[player]||'#888', backgroundColor:(PLAYER_COLORS[player]||'#888')+'22',
+          borderWidth:2.5, pointRadius:4, pointBackgroundColor:PLAYER_COLORS[player]||'#888',
+          fill:true, tension:0.3
+        }]
+      },
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        plugins:{legend:{display:false}},
+        scales:{
+          x:{ticks:{color:'#8b949e',font:{size:10}},grid:{color:'#21262d'}},
+          y:{ticks:{color:'#8b949e',font:{size:10}},grid:{color:'#21262d'}}
+        }
+      }
+    });
+  }
+}
+
+// ── AWARDS ────────────────────────────────────────────────────────────────────
+async function renderAwards(el) {
+  el.innerHTML=`<div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
+    <h2 style="font-size:1.5rem;font-weight:900;margin-bottom:0.25rem">🎖️ Awards</h2>
+    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">Auto-calculated from all sessions · Updated live</p>
+    <div id="awards-body"><p style="color:var(--text2);text-align:center;padding:3rem 0">Loading…</p></div>
+  </div>`;
+
+  if (!db) { document.getElementById('awards-body').innerHTML=notConfiguredMsg('awards'); return; }
+
+  const [{data:results},{data:sessions}]=await Promise.all([
+    db.from('session_results').select('player_name,buyins,session_id'),
+    db.from('sessions').select('id,date').order('date',{ascending:true})
+  ]);
+
+  if (!results||results.length===0) {
+    document.getElementById('awards-body').innerHTML=`<p style="color:var(--text2);text-align:center;padding:3rem 0">No sessions yet — play some games first! 🃏</p>`;
+    return;
+  }
+
+  const sessionMap={}; (sessions||[]).forEach(s=>sessionMap[s.id]=s.date);
+  const allNames=ALL_PLAYER_ROWS.length>0?ALL_PLAYER_ROWS.map(p=>p.name):PLAYERS;
+  const pData={};
+  allNames.forEach(p=>pData[p]=[]);
+  (results||[]).forEach(r=>{
+    if (!pData[r.player_name]) pData[r.player_name]=[];
+    pData[r.player_name].push({buyins:Number(r.buyins),date:sessionMap[r.session_id]||'',sessionId:r.session_id});
+  });
+  Object.keys(pData).forEach(p=>pData[p].sort((a,b)=>a.date.localeCompare(b.date)));
+
+  const allPNames=Object.keys(pData);
+  const bySessions=allPNames.filter(p=>pData[p].length>0).sort((a,b)=>pData[b].length-pData[a].length);
+  const ironManP=bySessions[0];
+
+  const cutoff=new Date(); cutoff.setDate(cutoff.getDate()-30);
+  const cutoffISO=cutoff.toISOString().slice(0,10);
+  const recentNet=allPNames.map(p=>{
+    const recent=pData[p].filter(r=>r.date>=cutoffISO);
+    return {player:p,total:recent.reduce((a,r)=>a+r.buyins,0),count:recent.length};
+  }).filter(x=>x.count>0).sort((a,b)=>a.total-b.total);
+  const donatorP=recentNet[0];
+
+  const latestSession=sessions?.[sessions.length-1];
+  let hotHandR=null;
+  if (latestSession) {
+    const lRes=results.filter(r=>r.session_id===latestSession.id).sort((a,b)=>b.buyins-a.buyins);
+    if (lRes.length) hotHandR=lRes[0];
+  }
+
+  let comebackP=null, comebackV=-Infinity;
+  allPNames.forEach(p=>{
+    const s=pData[p];
+    for (let i=2;i<s.length;i++) {
+      if (s[i-1].buyins<0&&s[i-2].buyins<0&&s[i].buyins>comebackV){comebackV=s[i].buyins;comebackP=p;}
+    }
+  });
+
+  const swings=allPNames.map(p=>{
+    const d=pData[p]; if(d.length<2) return null;
+    return {player:p,avg:d.reduce((a,r)=>a+Math.abs(r.buyins),0)/d.length};
+  }).filter(Boolean).sort((a,b)=>a.avg-b.avg);
+  const rockP=swings[0];
+
+  function awardCard(icon,title,winner,desc,flavor){
+    const color=winner?PLAYER_COLORS[winner]||'#888':'#888';
+    return `<div class="card award-card" style="padding:1rem;margin-bottom:0.875rem">
+      <div style="display:flex;align-items:flex-start;gap:0.875rem">
+        <div style="font-size:2rem;line-height:1">${icon}</div>
+        <div style="flex:1">
+          <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.375rem">
+            <span style="font-weight:900;font-size:1.05rem;color:var(--text)">${title}</span>
+            ${winner?`<div style="width:0.5rem;height:0.5rem;border-radius:50%;background:${color}"></div>`:''}
+          </div>
+          <p style="font-size:0.875rem;color:var(--text2);margin:0 0 0.375rem">${desc}</p>
+          ${flavor?`<p style="font-size:0.8rem;font-style:italic;color:var(--red);margin:0">"${flavor}"</p>`:''}
+        </div>
+      </div>
+    </div>`;
+  }
+
+  document.getElementById('awards-body').innerHTML=[
+    awardCard('💪','Iron Man',ironManP,
+      ironManP?`${displayName(ironManP)} has played the most — ${pData[ironManP].length} sessions and counting.`:'No data yet.',
+      ironManP?`${displayName(ironManP)} never misses a game.`:''
+    ),
+    awardCard('💸','Donator of the Month',donatorP?.player,
+      donatorP?`${displayName(donatorP.player)} has generously contributed ${fmtBi(donatorP.total)} buy-ins (${fmtRs(donatorP.total)}) to the table in the last 30 days.`:'No losses in the last 30 days!',
+      donatorP?`${displayName(donatorP.player)} keeps the game alive. 🙏`:''
+    ),
+    awardCard('🔥','Hot Hand',hotHandR?.player_name,
+      hotHandR?`${displayName(hotHandR.player_name)} led the last session with +${Number(hotHandR.buyins).toFixed(2)} bi (${fmtRs(Number(hotHandR.buyins))}).`:'No sessions played yet.',
+      hotHandR?`${displayName(hotHandR.player_name)} is running hot right now.`:''
+    ),
+    awardCard('👑','Comeback King',comebackP,
+      comebackP?`${displayName(comebackP)} pulled off the biggest win after back-to-back losses: +${comebackV.toFixed(2)} bi (${fmtRs(comebackV)}).`:'Need at least 3 sessions per player to calculate this.',
+      comebackP?`Never count out ${displayName(comebackP)}.`:''
+    ),
+    awardCard('🪨','Rock of the Table',rockP?.player,
+      rockP?`${displayName(rockP.player)} is the most consistent — average swing of just ${rockP.avg.toFixed(2)} buy-ins per session.`:'Need more sessions.',
+      rockP?`${displayName(rockP.player)} — steady as a rock.`:''
+    ),
+  ].join('');
+}
+
+// ── PLAYERS PAGE ──────────────────────────────────────────────────────────────
+async function renderPlayersPage(el) {
+  el.innerHTML=`<div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
+    <h2 style="font-size:1.5rem;font-weight:900;margin-bottom:0.25rem">👥 Players</h2>
+    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">Manage your group</p>
+    <div id="players-body"><p style="color:var(--text2);text-align:center;padding:3rem 0">Loading…</p></div>
+  </div>`;
+  await loadPlayersPage();
+}
+
+async function loadPlayersPage() {
+  const body=document.getElementById('players-body'); if (!body) return;
+  if (!db) { body.innerHTML=notConfiguredMsg('players'); return; }
+
+  const {data:players}=await db.from('players').select('*').order('created_at');
+  if (!players) return;
+
+  ALL_PLAYER_ROWS=players;
+  PLAYERS=players.filter(p=>p.active).map(p=>p.name);
+  players.forEach(p=>{PLAYER_COLORS[p.name]=p.color;});
+
+  const active=players.filter(p=>p.active);
+  const retired=players.filter(p=>!p.active);
+
+  body.innerHTML=`
+    <div class="card" style="padding:1rem;margin-bottom:1.25rem">
+      <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">Add New Player</div>
+      <input type="text" id="new-player-name" class="inp" placeholder="Player name" style="display:block;width:100%;padding:0.75rem;font-size:0.9rem;margin-bottom:0.75rem" maxlength="20" />
+      <div style="font-size:0.75rem;color:var(--text2);margin-bottom:0.5rem">Pick a colour</div>
+      <div style="display:flex;flex-wrap:wrap;gap:0.5rem;margin-bottom:0.75rem" id="add-swatches">
+        ${COLOR_PRESETS.map(c=>`<button type="button" data-ac="${c}" class="color-swatch" style="width:2rem;height:2rem;border-radius:50%;background:${c};border:2px solid transparent;cursor:pointer"></button>`).join('')}
+      </div>
+      <input type="hidden" id="new-player-color" value="${COLOR_PRESETS[0]}" />
+      <button id="add-player-btn" class="btn-red" style="width:100%;padding:0.75rem;font-size:0.9rem">+ Add Player</button>
+    </div>
+
+    <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Active (${active.length})</div>
+    ${active.map(p=>playerRowHTML(p,false)).join('')}
+
+    ${retired.length>0?`
+    <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin:1rem 0 0.5rem">Retired (${retired.length})</div>
+    ${retired.map(p=>playerRowHTML(p,true)).join('')}
+    `:''}
+  `;
+
+  // Select first color swatch by default
+  selectAddColor(COLOR_PRESETS[0]);
+
+  document.querySelectorAll('[data-ac]').forEach(s=>{
+    s.addEventListener('click',()=>selectAddColor(s.dataset.ac));
+  });
+
+  document.getElementById('add-player-btn').addEventListener('click', async ()=>{
+    const name=document.getElementById('new-player-name').value.trim();
+    const color=document.getElementById('new-player-color').value;
+    if (!name){showToast('Enter a player name','#e53e3e');return;}
+    const btn=document.getElementById('add-player-btn');
+    btn.textContent='Adding…';btn.disabled=true;
+    const {error}=await db.from('players').insert({name,color});
+    if (error){
+      showToast(error.code==='23505'?'Player already exists':'Error adding player','#e53e3e');
+      btn.textContent='+ Add Player';btn.disabled=false;return;
+    }
+    showToast(`${name} added!`);
+    await loadPlayersPage();
+  });
+
+  document.querySelectorAll('[data-edit-p]').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      const p=ALL_PLAYER_ROWS.find(x=>x.id===btn.dataset.editP);
+      if(p) showEditRow(p);
+    });
+  });
+  document.querySelectorAll('[data-retire-p]').forEach(btn=>{
+    btn.addEventListener('click',async()=>{
+      const p=ALL_PLAYER_ROWS.find(x=>x.id===btn.dataset.retireP);
+      if (!confirm(`Retire ${p?.name}? They won't appear in new sessions but their history stays.`)) return;
+      await db.from('players').update({active:false}).eq('id',btn.dataset.retireP);
+      showToast(`${p?.name} retired`);
+      await loadPlayersPage();
+    });
+  });
+  document.querySelectorAll('[data-reactivate-p]').forEach(btn=>{
+    btn.addEventListener('click',async()=>{
+      const p=ALL_PLAYER_ROWS.find(x=>x.id===btn.dataset.reactivateP);
+      await db.from('players').update({active:true}).eq('id',btn.dataset.reactivateP);
+      showToast(`${p?.name} reactivated!`);
+      await loadPlayersPage();
+    });
+  });
+}
+
+function playerRowHTML(p, retired) {
+  return `<div id="prow-${p.id}" class="card" style="padding:0.875rem 1rem;margin-bottom:0.5rem;display:flex;align-items:center;gap:0.75rem">
+    <div style="width:0.875rem;height:0.875rem;border-radius:50%;background:${p.color};flex-shrink:0"></div>
+    <div style="flex:1;font-weight:600;color:${retired?'var(--text2)':'var(--text)'}">${p.name}</div>
+    ${retired
+      ? `<button data-reactivate-p="${p.id}" class="btn-ghost" style="padding:0.375rem 0.75rem;font-size:0.75rem">Reactivate</button>`
+      : `<button data-edit-p="${p.id}" class="btn-ghost" style="padding:0.375rem 0.75rem;font-size:0.75rem">Edit</button>
+         <button data-retire-p="${p.id}" style="padding:0.375rem 0.75rem;font-size:0.75rem;font-weight:600;border-radius:0.75rem;border:1px solid rgba(248,81,73,0.25);color:var(--neg);background:rgba(248,81,73,0.05);cursor:pointer">Retire</button>`
+    }
+  </div>`;
+}
+
+function selectAddColor(color) {
+  document.getElementById('new-player-color').value=color;
+  document.querySelectorAll('[data-ac]').forEach(s=>{
+    s.style.borderColor=s.dataset.ac===color?'#fff':'transparent';
+    s.style.transform=s.dataset.ac===color?'scale(1.25)':'scale(1)';
+  });
+}
+
+function showEditRow(p) {
+  const row=document.getElementById('prow-'+p.id);
+  if (!row) return;
+  row.innerHTML=`
+    <div style="flex:1;display:flex;flex-direction:column;gap:0.5rem;width:100%">
+      <input type="text" id="ename-${p.id}" class="inp" value="${p.name}" style="padding:0.5rem 0.75rem;font-size:0.9rem;font-weight:600;width:100%" maxlength="20" />
+      <div style="display:flex;flex-wrap:wrap;gap:0.375rem" id="eswatches-${p.id}">
+        ${COLOR_PRESETS.map(c=>`<button type="button" data-ec-${p.id}="${c}" style="width:1.75rem;height:1.75rem;border-radius:50%;background:${c};border:2px solid ${c===p.color?'#fff':'transparent'};cursor:pointer;transform:${c===p.color?'scale(1.2)':'scale(1)'};transition:all 0.15s"></button>`).join('')}
+      </div>
+      <input type="hidden" id="ecolor-${p.id}" value="${p.color}" />
+      <div style="display:flex;gap:0.5rem">
+        <button id="esave-${p.id}" class="btn-red" style="flex:1;padding:0.5rem;font-size:0.85rem">Save</button>
+        <button id="ecancel-${p.id}" class="btn-ghost" style="flex:1;padding:0.5rem;font-size:0.85rem">Cancel</button>
+      </div>
+    </div>`;
+
+  document.querySelectorAll(`[data-ec-${p.id}]`).forEach(s=>{
+    s.addEventListener('click',()=>{
+      const c=s.getAttribute(`data-ec-${p.id}`);
+      document.getElementById('ecolor-'+p.id).value=c;
+      document.querySelectorAll(`[data-ec-${p.id}]`).forEach(x=>{
+        x.style.borderColor=x.getAttribute(`data-ec-${p.id}`)===c?'#fff':'transparent';
+        x.style.transform=x.getAttribute(`data-ec-${p.id}`)===c?'scale(1.2)':'scale(1)';
+      });
+    });
+  });
+
+  document.getElementById('ecancel-'+p.id).addEventListener('click',async()=>await loadPlayersPage());
+
+  document.getElementById('esave-'+p.id).addEventListener('click', async()=>{
+    const newName=document.getElementById('ename-'+p.id).value.trim();
+    const newColor=document.getElementById('ecolor-'+p.id).value;
+    if (!newName){showToast('Name cannot be empty','#e53e3e');return;}
+    const btn=document.getElementById('esave-'+p.id);
+    btn.textContent='Saving…';btn.disabled=true;
+    const {error}=await db.from('players').update({name:newName,color:newColor}).eq('id',p.id);
+    if (error){showToast('Error saving','#e53e3e');btn.textContent='Save';btn.disabled=false;return;}
+    if (newName!==p.name) {
+      await db.from('session_results').update({player_name:newName}).eq('player_name',p.name);
+    }
+    await loadPlayersPage();
+  });
+}
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
