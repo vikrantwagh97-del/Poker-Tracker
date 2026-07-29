@@ -81,14 +81,148 @@ let PLAYER_COLORS = {
   Vikrant:'#f59e0b', Dhal:'#3b82f6', Rathore:'#a855f7', Alok:'#10b981',
   Totala:'#f97316', SV:'#ec4899', Suneet:'#06b6d4', Lavish:'#84cc16', Savya:'#14b8a6'
 };
+// Profile images keyed by player name (compressed data URLs from the players.image_url column)
+let PLAYER_IMAGES = {};
+
+// ── BACKEND SELECTION ─────────────────────────────────────────────────────────
+// 'local'    → browser localStorage, for testing without touching Supabase.
+// 'supabase' → the real hosted database.
+// Flip to 'supabase' once everything works locally.
+const BACKEND = 'supabase';
+
+// ── LOCAL BACKEND (localStorage) ───────────────────────────────────────────────
+// Minimal drop-in for the subset of the Supabase JS query builder this app uses:
+// .from(table).select()/.insert()/.update()/.delete(), .eq/.order/.limit/.single(),
+// embedded selects ('*, child(*)'), cascade deletes, and the 23505 unique code.
+// Each query is a thenable, so `await db.from(...)...` works unchanged.
+const LOCAL_STORAGE_KEY = 'poker_local_db';
+// parent table → [{ childTable, fk }] for embedded selects and cascade deletes.
+const LOCAL_RELATIONS = {
+  active_session: [
+    { childTable: 'active_session_buyins',    fk: 'active_session_id' },
+    { childTable: 'active_session_buyin_log', fk: 'active_session_id' },
+  ],
+  sessions: [
+    { childTable: 'session_results', fk: 'session_id' },
+  ],
+};
+
+function createLocalDb() {
+  function loadAll() {
+    try { return JSON.parse(localStorage.getItem(LOCAL_STORAGE_KEY)) || {}; }
+    catch(e) { return {}; }
+  }
+  function saveAll(data) { localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data)); }
+  function table(data, name) { if (!data[name]) data[name] = []; return data[name]; }
+  function newId() { return (crypto.randomUUID ? crypto.randomUUID() : 'id-' + Date.now() + '-' + Math.random().toString(16).slice(2)); }
+
+  // Seed the players table from the hardcoded defaults so the app is usable immediately.
+  (function seed() {
+    const data = loadAll();
+    if (!data.players) {
+      data.players = PLAYERS.map((name, i) => ({
+        id: newId(), name, color: PLAYER_COLORS[name] || '#888',
+        active: true, image_url: null, created_at: new Date(Date.now() + i).toISOString(),
+      }));
+      saveAll(data);
+    }
+  })();
+
+  function embed(data, rows, selectStr) {
+    // Attach any embedded child collections referenced as `child(*)` in the select.
+    (selectStr.match(/(\w+)\s*\(/g) || []).forEach(m => {
+      const child = m.replace(/\s*\($/, '');
+      const rel = Object.values(LOCAL_RELATIONS).flat().find(r => r.childTable === child);
+      if (!rel) return;
+      const childRows = table(data, child);
+      rows.forEach(row => { row[child] = childRows.filter(c => c[rel.fk] === row.id); });
+    });
+    return rows;
+  }
+
+  class LocalQuery {
+    constructor(name) {
+      this.name = name; this.op = 'select'; this.selectStr = '*';
+      this.filters = []; this.orderBy = null; this._limit = null;
+      this._single = false; this._returnRows = false; this.payload = null;
+    }
+    select(str = '*') { if (this.op === 'select') this.selectStr = str; else this._returnRows = true; if (str && str !== '*') this.selectStr = str; return this; }
+    insert(rows) { this.op = 'insert'; this.payload = Array.isArray(rows) ? rows : [rows]; return this; }
+    update(patch) { this.op = 'update'; this.payload = patch; return this; }
+    delete() { this.op = 'delete'; return this; }
+    eq(col, val) { this.filters.push([col, val]); return this; }
+    order(col, opts = {}) { this.orderBy = { col, ascending: opts.ascending !== false }; return this; }
+    limit(n) { this._limit = n; return this; }
+    single() { this._single = true; return this; }
+
+    _match(row) { return this.filters.every(([c, v]) => row[c] === v); }
+
+    _run() {
+      const data = loadAll();
+      const rows = table(data, this.name);
+      try {
+        if (this.op === 'insert') {
+          const inserted = this.payload.map(r => {
+            if (this.name === 'players' && rows.some(x => x.name === r.name))
+              throw { code: '23505', message: 'duplicate key value' };
+            return { id: newId(), created_at: new Date().toISOString(), ...r };
+          });
+          // Second pass so a duplicate in a multi-row insert doesn't partially write.
+          inserted.forEach(r => rows.push(r));
+          saveAll(data);
+          const out = JSON.parse(JSON.stringify(inserted));
+          if (this._returnRows || this._single) return { data: this._single ? (out[0] || null) : out, error: null };
+          return { data: null, error: null };
+        }
+        if (this.op === 'update') {
+          const patch = this.payload;
+          rows.filter(r => this._match(r)).forEach(r => Object.assign(r, patch));
+          saveAll(data);
+          return { data: null, error: null };
+        }
+        if (this.op === 'delete') {
+          const toDelete = rows.filter(r => this._match(r));
+          const rels = LOCAL_RELATIONS[this.name] || [];
+          const ids = new Set(toDelete.map(r => r.id));
+          rels.forEach(rel => {
+            const childRows = table(data, rel.childTable);
+            data[rel.childTable] = childRows.filter(c => !ids.has(c[rel.fk]));
+          });
+          data[this.name] = rows.filter(r => !this._match(r));
+          saveAll(data);
+          return { data: null, error: null };
+        }
+        // select
+        let result = rows.filter(r => this._match(r)).map(r => ({ ...r }));
+        embed(data, result, this.selectStr);
+        if (this.orderBy) {
+          const { col, ascending } = this.orderBy;
+          result.sort((a, b) => (a[col] > b[col] ? 1 : a[col] < b[col] ? -1 : 0) * (ascending ? 1 : -1));
+        }
+        if (this._limit != null) result = result.slice(0, this._limit);
+        return { data: this._single ? (result[0] || null) : result, error: null };
+      } catch (err) {
+        return { data: null, error: (err && err.code) ? err : { message: String(err && err.message || err) } };
+      }
+    }
+
+    then(resolve, reject) { try { resolve(this._run()); } catch (e) { if (reject) reject(e); else throw e; } }
+  }
+
+  return { from(name) { return new LocalQuery(name); } };
+}
 
 // ── SUPABASE ──────────────────────────────────────────────────────────────────
 const SUPABASE_CONFIGURED = SUPABASE_URL !== 'YOUR_SUPABASE_URL';
 let db = null;
-try {
-  if (SUPABASE_CONFIGURED && typeof supabase !== 'undefined')
-    db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-} catch(e) { console.warn('Supabase init failed:', e); }
+if (BACKEND === 'local') {
+  try { db = createLocalDb(); } catch(e) { console.warn('Local backend init failed:', e); }
+} else {
+  try {
+    if (SUPABASE_CONFIGURED && typeof supabase !== 'undefined')
+      db = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  } catch(e) { console.warn('Supabase init failed:', e); }
+}
 
 // ── STATE ─────────────────────────────────────────────────────────────────────
 let currentPage = location.hash.slice(1) || 'login';
@@ -132,8 +266,53 @@ function formatDate(s) {
 function formatDateShort(s) {
   return new Date(s+'T00:00:00').toLocaleDateString('en-IN',{day:'numeric',month:'short'});
 }
+function formatTime(iso) {
+  const d=new Date(iso);
+  if (isNaN(d)) return '';
+  return d.toLocaleTimeString('en-IN',{hour:'numeric',minute:'2-digit',hour12:true})
+    + ' · ' + d.toLocaleDateString('en-IN',{day:'numeric',month:'short'});
+}
 function notConfiguredMsg(what) {
   return `<p style="color:#f59e0b;text-align:center;padding:3rem 1rem">Connect Supabase to see ${what}.</p>`;
+}
+
+// Circular avatar: profile image if the player has one, otherwise a coloured initial.
+// `size` is the diameter in px.
+function avatarHTML(player, size = 40) {
+  const img = PLAYER_IMAGES[player];
+  const color = PLAYER_COLORS[player] || '#888';
+  if (img) {
+    return `<img src="${img}" alt="${player}"
+      style="width:${size}px;height:${size}px;border-radius:50%;object-fit:cover;flex-shrink:0;border:2px solid ${color}" />`;
+  }
+  const initial = (player || '?').trim().charAt(0).toUpperCase();
+  return `<div style="width:${size}px;height:${size}px;border-radius:50%;background:${color};color:#fff;flex-shrink:0;
+    display:flex;align-items:center;justify-content:center;font-weight:900;font-size:${Math.round(size*0.45)}px">${initial}</div>`;
+}
+
+// Read an image File, downscale/crop it to a square and return a compressed JPEG data URL.
+// Keeps the stored value small enough to sit in a normal DB text column.
+function fileToAvatarDataURL(file, size = 256) {
+  return new Promise((resolve, reject) => {
+    if (!file || !file.type.startsWith('image/')) { reject(new Error('Not an image')); return; }
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Could not read file'));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error('Invalid image'));
+      img.onload = () => {
+        const side = Math.min(img.width, img.height);
+        const sx = (img.width - side) / 2, sy = (img.height - side) / 2;
+        const canvas = document.createElement('canvas');
+        canvas.width = canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+        resolve(canvas.toDataURL('image/jpeg', 0.8));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
@@ -143,13 +322,13 @@ async function loadPlayers() {
   if (data && data.length > 0) {
     ALL_PLAYER_ROWS = data;
     PLAYERS = data.filter(p => p.active).map(p => p.name);
-    data.forEach(p => { PLAYER_COLORS[p.name] = p.color; });
+    data.forEach(p => { PLAYER_COLORS[p.name] = p.color; if (p.image_url) PLAYER_IMAGES[p.name] = p.image_url; });
   }
 }
 
 async function checkActiveSession() {
   if (!db) return;
-  const { data } = await db.from('active_session').select('*, active_session_buyins(*)').limit(1);
+  const { data } = await db.from('active_session').select('*, active_session_buyins(*), active_session_buyin_log(*)').limit(1);
   activeSessionData = (data && data.length > 0) ? data[0] : null;
 }
 
@@ -217,7 +396,12 @@ function bindLogin() {
       sessionStorage.setItem('poker_auth', '1');
       btn.textContent = 'Loading…'; btn.disabled = true;
       await Promise.all([loadPlayers(), checkActiveSession()]);
-      navigate('leaderboard');
+      // Render directly rather than via navigate(): if the hash is already
+      // '#leaderboard', reassigning it fires no hashchange event, leaving the
+      // page stuck on "Loading…". replaceState updates the URL without an event.
+      currentPage = 'leaderboard';
+      history.replaceState(null, '', '#leaderboard');
+      render();
     } else {
       err.style.display = 'block'; pw.value = ''; pw.focus();
     }
@@ -292,7 +476,7 @@ async function renderLeaderboard(el) {
       style="width:100%;text-align:left;display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;margin-bottom:0.5rem;${i===0?'border-color:#f59e0b':''}"
       class="card">
       <div style="font-size:1.4rem;width:2rem;text-align:center">${medals[i]||`<span style="color:var(--text2);font-weight:700;font-size:0.85rem">${i+1}</span>`}</div>
-      <div style="width:0.625rem;height:0.625rem;border-radius:50%;background:${PLAYER_COLORS[player]||'#888'};flex-shrink:0"></div>
+      ${avatarHTML(player,36)}
       <div style="flex:1;min-width:0">
         <div style="font-weight:700;color:${retired?'var(--text2)':'var(--text)'}">${player}${retired?' <span style="font-size:0.65rem;color:var(--text2);font-weight:400">(retired)</span>':''}</div>
         <div style="font-size:0.75rem;color:var(--text2)">${fmtBi(total)} buy-ins</div>
@@ -340,7 +524,7 @@ function renderNewSession(el) {
   el.innerHTML = `
   <div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
     <h2 style="font-size:1.5rem;font-weight:900;margin-bottom:0.25rem">Start Session</h2>
-    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">Select players and starting buy-ins</p>
+    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">Select players — everyone starts with 1 buy-in</p>
 
     <div class="card" style="padding:1rem;margin-bottom:1rem">
       <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Date</label>
@@ -349,16 +533,17 @@ function renderNewSession(el) {
     </div>
 
     <div class="card" style="padding:1rem;margin-bottom:1rem">
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.25rem">Session Passcode</label>
+      <p style="font-size:0.75rem;color:var(--text2);margin-bottom:0.75rem">Set a 4-digit code — it's required to save buy-in changes during the session.</p>
+      <input type="password" id="session-passcode" inputmode="numeric" maxlength="4" placeholder="••••"
+        class="inp" style="display:block;width:100%;padding:0.75rem 1rem;font-size:1.25rem;letter-spacing:0.3em;font-weight:700;text-align:center;color:var(--text)" />
+    </div>
+
+    <div class="card" style="padding:1rem;margin-bottom:1rem">
       <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">Who's playing?</label>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.5rem" id="player-select">
         ${PLAYERS.map(p=>`<button data-player="${p}" class="player-pill" style="padding:0.75rem 0.5rem;font-size:0.875rem;text-align:center">${p}</button>`).join('')}
       </div>
-    </div>
-
-    <div id="starting-section" class="card" style="display:none;padding:1rem;margin-bottom:1.25rem">
-      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.25rem">Starting Buy-ins</label>
-      <p style="font-size:0.75rem;color:var(--text2);margin-bottom:0.75rem">Default is 1. Increase if someone is starting with more.</p>
-      <div id="starting-inputs" style="display:flex;flex-direction:column;gap:0.6rem"></div>
     </div>
 
     <button id="start-btn" class="btn-red" style="display:none;width:100%;font-size:1.125rem;padding:1rem">Start Session →</button>
@@ -370,45 +555,12 @@ function renderNewSession(el) {
 function bindNewSessionStart() {
   const selected = new Set();
 
-  function updateStarting() {
-    const section = document.getElementById('starting-section');
-    const startBtn = document.getElementById('start-btn');
-    const inputs = document.getElementById('starting-inputs');
-    if (selected.size === 0) { section.style.display='none'; startBtn.style.display='none'; return; }
-    section.style.display='block'; startBtn.style.display='block';
-
-    inputs.innerHTML = [...selected].map(p => `
-      <div style="display:flex;align-items:center;gap:0.75rem">
-        <div style="width:0.5rem;height:0.5rem;border-radius:50%;background:${PLAYER_COLORS[p]||'#888'};flex-shrink:0"></div>
-        <div style="flex:1;font-weight:600;font-size:0.9rem;color:var(--text)">${p}</div>
-        <button type="button" data-minus="${p}" class="btn-ghost" style="width:2.5rem;height:2.5rem;font-size:1.2rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0">−</button>
-        <div id="sbi-${p}" style="width:1.25rem;text-align:center;font-weight:900;font-size:1.1rem;color:var(--text)">1</div>
-        <button type="button" data-plus="${p}" class="btn-ghost" style="width:2.5rem;height:2.5rem;font-size:1.2rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0">+</button>
-        <div style="font-size:0.8rem;color:var(--text2);width:3.5rem;text-align:right;flex-shrink:0">₹<span id="sbi-rs-${p}">200</span></div>
-      </div>`).join('');
-
-    document.querySelectorAll('[data-plus]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const p=btn.dataset.plus, el=document.getElementById('sbi-'+p);
-        const v=parseInt(el.textContent)+1; el.textContent=v;
-        document.getElementById('sbi-rs-'+p).textContent=(v*BUYIN_VALUE).toLocaleString('en-IN');
-      });
-    });
-    document.querySelectorAll('[data-minus]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const p=btn.dataset.minus, el=document.getElementById('sbi-'+p);
-        const v=Math.max(1,parseInt(el.textContent)-1); el.textContent=v;
-        document.getElementById('sbi-rs-'+p).textContent=(v*BUYIN_VALUE).toLocaleString('en-IN');
-      });
-    });
-  }
-
   document.querySelectorAll('.player-pill').forEach(btn => {
     btn.addEventListener('click', () => {
       const p=btn.dataset.player;
       if (selected.has(p)) { selected.delete(p); btn.classList.remove('selected'); }
       else { selected.add(p); btn.classList.add('selected'); }
-      updateStarting();
+      document.getElementById('start-btn').style.display = selected.size > 0 ? 'block' : 'none';
     });
   });
 
@@ -416,23 +568,26 @@ function bindNewSessionStart() {
     if (selected.size === 0) { showToast('Select at least one player','#e53e3e'); return; }
     const date=document.getElementById('session-date').value;
     if (!date) { showToast('Pick a date','#e53e3e'); return; }
+    const passcode=document.getElementById('session-passcode').value.trim();
+    if (!/^\d{4}$/.test(passcode)) { showToast('Set a 4-digit passcode','#e53e3e'); return; }
     if (!db)   { showToast('Supabase not configured','#e53e3e'); return; }
 
     const btn=document.getElementById('start-btn');
     btn.textContent='Starting…'; btn.disabled=true;
 
-    const {data:session,error:sErr}=await db.from('active_session').insert({date}).select().single();
+    const {data:session,error:sErr}=await db.from('active_session').insert({date,passcode}).select().single();
     if (sErr) { showToast('Error starting session','#e53e3e'); btn.textContent='Start Session →'; btn.disabled=false; return; }
 
+    // Everyone starts with 1 buy-in; further buy-ins are recorded during the session.
     const rows=[...selected].map(p=>({
       active_session_id:session.id,
       player_name:p,
-      buyins:parseInt(document.getElementById('sbi-'+p)?.textContent||'1')
+      buyins:1
     }));
     const {error:bErr}=await db.from('active_session_buyins').insert(rows);
     if (bErr) { showToast('Error saving buy-ins','#e53e3e'); btn.textContent='Start Session →'; btn.disabled=false; return; }
 
-    const {data:full}=await db.from('active_session').select('*, active_session_buyins(*)').eq('id',session.id).single();
+    const {data:full}=await db.from('active_session').select('*, active_session_buyins(*), active_session_buyin_log(*)').eq('id',session.id).single();
     activeSessionData=full;
     navigate('active-session');
   });
@@ -450,6 +605,9 @@ async function renderActiveSession(el) {
 function showTrackingView(el) {
   const s=activeSessionData;
   const buyins=(s.active_session_buyins||[]).slice().sort((a,b)=>a.player_name.localeCompare(b.player_name));
+  // Timestamped ledger of each recorded buy-in, newest first.
+  const log=(s.active_session_buyin_log||[]).slice().sort((a,b)=>(b.created_at||'').localeCompare(a.created_at||''));
+  const totalBi=buyins.reduce((a,b)=>a+b.buyins,0);
 
   el.innerHTML=`
   <div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
@@ -460,21 +618,42 @@ function showTrackingView(el) {
         <span style="font-size:0.75rem;color:var(--green);font-weight:600">LIVE</span>
       </div>
     </div>
-    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:0.25rem">${formatDate(s.date)}</p>
-    <p style="color:var(--text2);font-size:0.8rem;margin-bottom:1.25rem">Tap + when someone rebuys · Updates sync across all phones</p>
+    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">${formatDate(s.date)}</p>
 
+    <!-- Overall committed buy-ins -->
     <div class="card" style="padding:1rem;margin-bottom:1rem">
-      <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">Buy-ins Taken</div>
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
+        <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2)">Total Buy-ins</div>
+        <div style="font-size:0.75rem;color:var(--text2)">${totalBi} bi · ₹${(totalBi*BUYIN_VALUE).toLocaleString('en-IN')}</div>
+      </div>
       <div style="display:flex;flex-direction:column;gap:0.75rem">
         ${buyins.map(b=>`
           <div style="display:flex;align-items:center;gap:0.75rem">
             <div style="width:0.5rem;height:0.5rem;border-radius:50%;background:${PLAYER_COLORS[b.player_name]||'#888'};flex-shrink:0"></div>
             <div style="flex:1;font-weight:600;color:var(--text)">${b.player_name}</div>
-            <button type="button" data-minus-id="${b.id}" class="btn-ghost" style="width:2.5rem;height:2.5rem;font-size:1.2rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0">−</button>
-            <div id="lbi-${b.id}" style="width:1.5rem;text-align:center;font-weight:900;font-size:1.1rem;color:var(--text)">${b.buyins}</div>
-            <button type="button" data-plus-id="${b.id}" class="btn-red" style="width:2.5rem;height:2.5rem;font-size:1.2rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;border-radius:0.5rem;flex-shrink:0">+</button>
-            <div style="font-size:0.8rem;color:var(--text2);width:3.5rem;text-align:right;flex-shrink:0">₹<span id="lrs-${b.id}">${(b.buyins*BUYIN_VALUE).toLocaleString('en-IN')}</span></div>
+            <div style="font-weight:900;font-size:1.1rem;color:var(--text)">${b.buyins} <span style="font-size:0.7rem;font-weight:600;color:var(--text2)">bi</span></div>
+            <div style="font-size:0.8rem;color:var(--text2);width:4rem;text-align:right;flex-shrink:0">₹${(b.buyins*BUYIN_VALUE).toLocaleString('en-IN')}</div>
           </div>`).join('')}
+      </div>
+    </div>
+
+    <button id="record-btn" class="btn-red" style="width:100%;font-size:1rem;padding:0.9rem;margin-bottom:1rem">+ Record New Buy-in</button>
+
+    <!-- History of recorded buy-ins -->
+    <div class="card" style="padding:1rem;margin-bottom:1rem">
+      <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">Buy-in History</div>
+      <div id="buyin-log">
+        ${log.length===0
+          ? `<p style="color:var(--text2);font-size:0.85rem;text-align:center;padding:1rem 0">No buy-ins recorded yet.</p>`
+          : log.map(e=>`
+            <div style="display:flex;align-items:center;gap:0.75rem;padding:0.5rem 0;border-top:1px solid var(--border)">
+              <div style="width:0.5rem;height:0.5rem;border-radius:50%;background:${PLAYER_COLORS[e.player_name]||'#888'};flex-shrink:0"></div>
+              <div style="flex:1;min-width:0">
+                <div style="font-weight:600;color:var(--text)">${e.player_name} <span style="color:var(--green);font-weight:700">+${e.amount}</span> <span style="font-size:0.7rem;color:var(--text2)">bi</span></div>
+                <div style="font-size:0.72rem;color:var(--text2)">${formatTime(e.created_at)}</div>
+              </div>
+              <div style="font-size:0.8rem;color:var(--text2);flex-shrink:0">₹${(e.amount*BUYIN_VALUE).toLocaleString('en-IN')}</div>
+            </div>`).join('')}
       </div>
     </div>
 
@@ -482,33 +661,7 @@ function showTrackingView(el) {
     <button id="cancel-btn" class="btn-ghost" style="width:100%;font-size:0.875rem;padding:0.75rem">Cancel Session</button>
   </div>`;
 
-  // +/- live buttons
-  document.querySelectorAll('[data-plus-id]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const id=btn.dataset.plusId;
-      const el=document.getElementById('lbi-'+id);
-      const newVal=parseInt(el.textContent)+1;
-      el.textContent=newVal;
-      document.getElementById('lrs-'+id).textContent=(newVal*BUYIN_VALUE).toLocaleString('en-IN');
-      const row=activeSessionData.active_session_buyins.find(b=>b.id===id);
-      if (row) row.buyins=newVal;
-      await db.from('active_session_buyins').update({buyins:newVal}).eq('id',id);
-    });
-  });
-  document.querySelectorAll('[data-minus-id]').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const id=btn.dataset.minusId;
-      const el=document.getElementById('lbi-'+id);
-      const cur=parseInt(el.textContent);
-      if (cur<=1) return;
-      const newVal=cur-1;
-      el.textContent=newVal;
-      document.getElementById('lrs-'+id).textContent=(newVal*BUYIN_VALUE).toLocaleString('en-IN');
-      const row=activeSessionData.active_session_buyins.find(b=>b.id===id);
-      if (row) row.buyins=newVal;
-      await db.from('active_session_buyins').update({buyins:newVal}).eq('id',id);
-    });
-  });
+  document.getElementById('record-btn').addEventListener('click', () => showRecordBuyinDialog(buyins));
 
   document.getElementById('end-btn').addEventListener('click', () => showEndView(document.getElementById('page')));
 
@@ -529,6 +682,92 @@ function showTrackingView(el) {
   });
 }
 
+// Modal to record a single buy-in: pick player, quantity, and confirm with the
+// session passcode. On success it appends a timestamped log row and bumps the
+// player's running total, then refreshes the tracking view.
+function showRecordBuyinDialog(buyins) {
+  const overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,0.6);display:flex;align-items:flex-end;justify-content:center;padding:0';
+  overlay.innerHTML=`
+    <div class="card fade-in" style="width:100%;max-width:672px;border-radius:1rem 1rem 0 0;padding:1.25rem 1rem 1.5rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <h3 style="font-size:1.2rem;font-weight:900;margin:0">Record Buy-in</h3>
+        <button id="rec-close" class="btn-ghost" style="width:2rem;height:2rem;padding:0;font-size:1.1rem;display:flex;align-items:center;justify-content:center">✕</button>
+      </div>
+
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Player</label>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.5rem;margin-bottom:1rem" id="rec-players">
+        ${buyins.map(b=>`<button type="button" data-rec-p="${b.player_name}" class="player-pill" style="padding:0.65rem 0.5rem;font-size:0.85rem;text-align:center">${b.player_name}</button>`).join('')}
+      </div>
+
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Buy-ins</label>
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem">
+        <button type="button" id="rec-minus" class="btn-ghost" style="width:2.75rem;height:2.75rem;font-size:1.3rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0">−</button>
+        <div id="rec-qty" style="flex:1;text-align:center;font-weight:900;font-size:1.5rem;color:var(--text)">1</div>
+        <button type="button" id="rec-plus" class="btn-ghost" style="width:2.75rem;height:2.75rem;font-size:1.3rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0">+</button>
+        <div style="font-size:0.85rem;color:var(--text2);width:4.5rem;text-align:right;flex-shrink:0">₹<span id="rec-rs">${BUYIN_VALUE}</span></div>
+      </div>
+
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Session Passcode</label>
+      <input type="password" id="rec-passcode" inputmode="numeric" maxlength="4" placeholder="••••"
+        class="inp" style="display:block;width:100%;padding:0.75rem;font-size:1.2rem;letter-spacing:0.3em;font-weight:700;text-align:center;color:var(--text);margin-bottom:0.5rem" />
+      <p id="rec-err" style="display:none;color:var(--neg);font-size:0.8rem;margin:0 0 0.5rem">Wrong passcode, try again.</p>
+
+      <button id="rec-save" class="btn-red" style="width:100%;font-size:1.05rem;padding:0.9rem">Add Buy-in</button>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  let selectedPlayer=null, qty=1;
+  function close(){ overlay.remove(); }
+  function refreshQty(){ document.getElementById('rec-rs').textContent=(qty*BUYIN_VALUE).toLocaleString('en-IN'); document.getElementById('rec-qty').textContent=qty; }
+
+  overlay.addEventListener('click', e=>{ if(e.target===overlay) close(); });
+  document.getElementById('rec-close').addEventListener('click', close);
+
+  overlay.querySelectorAll('[data-rec-p]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      selectedPlayer=btn.dataset.recP;
+      overlay.querySelectorAll('[data-rec-p]').forEach(x=>x.classList.toggle('selected', x===btn));
+    });
+  });
+  document.getElementById('rec-plus').addEventListener('click', ()=>{ qty++; refreshQty(); });
+  document.getElementById('rec-minus').addEventListener('click', ()=>{ if(qty>1){qty--; refreshQty();} });
+
+  document.getElementById('rec-save').addEventListener('click', async ()=>{
+    const err=document.getElementById('rec-err');
+    if (!selectedPlayer) { showToast('Pick a player','#e53e3e'); return; }
+    const entered=document.getElementById('rec-passcode').value.trim();
+    if (entered!==String(activeSessionData.passcode)) {
+      err.style.display='block';
+      document.getElementById('rec-passcode').value='';
+      return;
+    }
+    err.style.display='none';
+    const btn=document.getElementById('rec-save');
+    btn.textContent='Adding…'; btn.disabled=true;
+
+    // Append a ledger entry.
+    const {data:logRow,error:logErr}=await db.from('active_session_buyin_log')
+      .insert({active_session_id:activeSessionData.id, player_name:selectedPlayer, amount:qty})
+      .select().single();
+    if (logErr) { showToast('Error recording buy-in','#e53e3e'); btn.textContent='Add Buy-in'; btn.disabled=false; return; }
+
+    // Bump the player's running total.
+    const row=activeSessionData.active_session_buyins.find(b=>b.player_name===selectedPlayer);
+    const newTotal=(row?row.buyins:0)+qty;
+    if (row) {
+      const {error:upErr}=await db.from('active_session_buyins').update({buyins:newTotal}).eq('id',row.id);
+      if (upErr) { showToast('Error updating total','#e53e3e'); btn.textContent='Add Buy-in'; btn.disabled=false; return; }
+      row.buyins=newTotal;
+    }
+    (activeSessionData.active_session_buyin_log ||= []).push(logRow);
+
+    showToast(`${selectedPlayer} +${qty} buy-in${qty>1?'s':''} 🎉`);
+    close();
+    showTrackingView(document.getElementById('page'));
+  });
+}
+
 function showEndView(el) {
   const s=activeSessionData;
   const buyins=(s.active_session_buyins||[]).slice().sort((a,b)=>a.player_name.localeCompare(b.player_name));
@@ -537,11 +776,11 @@ function showEndView(el) {
   el.innerHTML=`
   <div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
     <h2 style="font-size:1.5rem;font-weight:900;margin-bottom:0.25rem">Final Buy-in Counts</h2>
-    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">Enter each player's final buy-in count (e.g. 2.5) — net is calculated automatically</p>
+    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">Enter each player's final buy-in count (e.g. 2.5) — net is calculated automatically. Winners are positive, losers negative, and the nets must sum to 0.</p>
 
     <div class="card" style="padding:1rem;margin-bottom:1rem">
       <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">
-        Total in play: ${totalBoughtBi} buy-ins · Final counts must also sum to ${totalBoughtBi}
+        Total in play: ${totalBoughtBi} buy-ins · Final counts must sum to ${totalBoughtBi}
       </div>
       <div style="display:flex;flex-direction:column;gap:0.75rem">
         ${buyins.map(b=>`
@@ -581,11 +820,11 @@ function showEndView(el) {
         netEl.textContent='—'; netEl.style.color='var(--text2)';
       }
     });
-    const diff=totalFinal-totalBoughtBi;
+    const diff=totalFinal-totalBoughtBi; // diff == sum of nets (must be 0)
     const hint=document.getElementById('end-hint'), ht=document.getElementById('end-hint-text');
     if (Math.abs(diff)>0.01 && allFilled) {
       hint.style.display='block';
-      ht.textContent=`Final counts sum to ${totalFinal.toFixed(2)} but should be ${totalBoughtBi} — recheck`;
+      ht.textContent=`Nets sum to ${diff>0?'+':''}${diff.toFixed(2)} but must be 0 — recheck (final counts total ${totalFinal.toFixed(2)}, should be ${totalBoughtBi})`;
     } else hint.style.display='none';
     return diff;
   }
@@ -598,7 +837,7 @@ function showEndView(el) {
       if (!document.getElementById('final-'+b.id)?.value.trim()) { showToast('Enter final count for all players','#e53e3e'); return; }
     }
     const diff=calcNets();
-    if (Math.abs(diff)>0.01) { showToast(`Counts don't sum to ${totalBoughtBi} — recheck`,'#e53e3e'); return; }
+    if (Math.abs(diff)>0.01) { showToast(`Nets must sum to 0 (now ${diff>0?'+':''}${diff.toFixed(2)}) — recheck`,'#e53e3e'); return; }
 
     const results=buyins.map(b=>{
       const finalBi=parseFloat(document.getElementById('final-'+b.id).value)||0;
@@ -741,7 +980,7 @@ async function renderProfile(el, player) {
   <div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
     <button onclick="history.back()" class="btn-ghost" style="font-size:0.875rem;padding:0.5rem 1rem;margin-bottom:1.25rem;display:inline-flex;align-items:center;gap:0.5rem">← Back</button>
     <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1.5rem">
-      <div style="width:1rem;height:1rem;border-radius:50%;background:${PLAYER_COLORS[player]||'#888'};flex-shrink:0"></div>
+      ${avatarHTML(player,56)}
       <div>
         <h2 style="font-size:1.5rem;font-weight:900;margin:0;color:var(--text)">${displayName(player)}</h2>
         <p style="color:var(--text2);font-size:0.875rem;margin:0">Player Profile</p>
@@ -966,7 +1205,7 @@ async function loadPlayersPage() {
 
   ALL_PLAYER_ROWS=players;
   PLAYERS=players.filter(p=>p.active).map(p=>p.name);
-  players.forEach(p=>{PLAYER_COLORS[p.name]=p.color;});
+  players.forEach(p=>{PLAYER_COLORS[p.name]=p.color; PLAYER_IMAGES[p.name]=p.image_url||null;});
 
   const active=players.filter(p=>p.active);
   const retired=players.filter(p=>!p.active);
@@ -1041,7 +1280,7 @@ async function loadPlayersPage() {
 
 function playerRowHTML(p, retired) {
   return `<div id="prow-${p.id}" class="card" style="padding:0.875rem 1rem;margin-bottom:0.5rem;display:flex;align-items:center;gap:0.75rem">
-    <div style="width:0.875rem;height:0.875rem;border-radius:50%;background:${p.color};flex-shrink:0"></div>
+    ${avatarHTML(p.name,36)}
     <div style="flex:1;font-weight:600;color:${retired?'var(--text2)':'var(--text)'}">${p.name}</div>
     ${retired
       ? `<button data-reactivate-p="${p.id}" class="btn-ghost" style="padding:0.375rem 0.75rem;font-size:0.75rem">Reactivate</button>`
@@ -1064,6 +1303,15 @@ function showEditRow(p) {
   if (!row) return;
   row.innerHTML=`
     <div style="flex:1;display:flex;flex-direction:column;gap:0.5rem;width:100%">
+      <div style="display:flex;align-items:center;gap:0.75rem">
+        <div id="eavatar-${p.id}">${avatarHTML(p.name,48)}</div>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+          <button type="button" id="ephoto-btn-${p.id}" class="btn-ghost" style="padding:0.4rem 0.75rem;font-size:0.8rem">📷 ${p.image_url?'Change photo':'Add photo'}</button>
+          <button type="button" id="ephoto-remove-${p.id}" class="btn-ghost" style="padding:0.4rem 0.75rem;font-size:0.8rem;display:${p.image_url?'inline-block':'none'}">Remove</button>
+        </div>
+        <input type="file" id="ephoto-input-${p.id}" accept="image/*" style="display:none" />
+      </div>
+      <input type="hidden" id="eimage-${p.id}" value="${p.image_url||''}" />
       <input type="text" id="ename-${p.id}" class="inp" value="${p.name}" style="padding:0.5rem 0.75rem;font-size:0.9rem;font-weight:600;width:100%" maxlength="20" />
       <div style="display:flex;flex-wrap:wrap;gap:0.375rem" id="eswatches-${p.id}">
         ${COLOR_PRESETS.map(c=>`<button type="button" data-ec-${p.id}="${c}" style="width:1.75rem;height:1.75rem;border-radius:50%;background:${c};border:2px solid ${c===p.color?'#fff':'transparent'};cursor:pointer;transform:${c===p.color?'scale(1.2)':'scale(1)'};transition:all 0.15s"></button>`).join('')}
@@ -1086,15 +1334,38 @@ function showEditRow(p) {
     });
   });
 
+  // Photo upload / preview / remove
+  const photoInput=document.getElementById('ephoto-input-'+p.id);
+  document.getElementById('ephoto-btn-'+p.id).addEventListener('click',()=>photoInput.click());
+  photoInput.addEventListener('change', async()=>{
+    const file=photoInput.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl=await fileToAvatarDataURL(file);
+      document.getElementById('eimage-'+p.id).value=dataUrl;
+      PLAYER_IMAGES[p.name]=dataUrl;
+      document.getElementById('eavatar-'+p.id).innerHTML=avatarHTML(p.name,48);
+      document.getElementById('ephoto-remove-'+p.id).style.display='inline-block';
+    } catch(err) { showToast('Could not load that image','#e53e3e'); }
+    photoInput.value='';
+  });
+  document.getElementById('ephoto-remove-'+p.id).addEventListener('click',()=>{
+    document.getElementById('eimage-'+p.id).value='';
+    PLAYER_IMAGES[p.name]=null;
+    document.getElementById('eavatar-'+p.id).innerHTML=avatarHTML(p.name,48);
+    document.getElementById('ephoto-remove-'+p.id).style.display='none';
+  });
+
   document.getElementById('ecancel-'+p.id).addEventListener('click',async()=>await loadPlayersPage());
 
   document.getElementById('esave-'+p.id).addEventListener('click', async()=>{
     const newName=document.getElementById('ename-'+p.id).value.trim();
     const newColor=document.getElementById('ecolor-'+p.id).value;
+    const newImage=document.getElementById('eimage-'+p.id).value||null;
     if (!newName){showToast('Name cannot be empty','#e53e3e');return;}
     const btn=document.getElementById('esave-'+p.id);
     btn.textContent='Saving…';btn.disabled=true;
-    const {error}=await db.from('players').update({name:newName,color:newColor}).eq('id',p.id);
+    const {error}=await db.from('players').update({name:newName,color:newColor,image_url:newImage}).eq('id',p.id);
     if (error){showToast('Error saving','#e53e3e');btn.textContent='Save';btn.disabled=false;return;}
     if (newName!==p.name) {
       await db.from('session_results').update({player_name:newName}).eq('player_name',p.name);
