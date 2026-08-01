@@ -66,6 +66,12 @@ const SUPABASE_URL      = 'https://xkdfcqanytgzdqrkjlqg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhrZGZjcWFueXRnemRxcmtqbHFnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4MjQ1NzksImV4cCI6MjA5ODQwMDU3OX0.aayD6SKis2gX4Vw14xMcdyBJpKWX3CfePg3VO4Sy0JQ';
 const PASSWORD    = '0000';
 const BUYIN_VALUE = 200;
+// The first entry (2026-07-07) is a historical accumulation seed carried over from
+// before tracking began — not a real game. It still counts toward all-time totals
+// (leaderboard + cumulative buy-in graphs) but must be excluded from per-session
+// stats: win rate, best/worst session, streak, session count, and awards.
+const HISTORICAL_SESSION_DATE = '2026-07-07';
+function isHistoricalDate(date) { return date === HISTORICAL_SESSION_DATE; }
 const NICKNAMES   = { Vikrant:'Tiger', Dhal:'Shark', Rathore:'Silverback Gorilla', Alok:'Mountain Goat', Totala:'Rhino' };
 const COLOR_PRESETS = [
   '#f59e0b','#3b82f6','#a855f7','#10b981','#f97316',
@@ -529,7 +535,7 @@ function renderNewSession(el) {
     <div class="card" style="padding:1rem;margin-bottom:1rem">
       <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Date</label>
       <input type="date" id="session-date" value="${todayISO()}"
-        class="inp" style="display:block;width:100%;padding:0.75rem 1rem;font-size:1rem;font-weight:600;color:var(--text)" />
+        class="inp" style="display:block;width:100%;max-width:100%;min-width:0;-webkit-appearance:none;appearance:none;padding:0.75rem 1rem;font-size:1rem;font-weight:600;color:var(--text)" />
     </div>
 
     <div class="card" style="padding:1rem;margin-bottom:1rem">
@@ -637,7 +643,8 @@ function showTrackingView(el) {
       </div>
     </div>
 
-    <button id="record-btn" class="btn-red" style="width:100%;font-size:1rem;padding:0.9rem;margin-bottom:1rem">+ Record New Buy-in</button>
+    <button id="record-btn" class="btn-red" style="width:100%;font-size:1rem;padding:0.9rem;margin-bottom:0.5rem">+ Record New Buy-in</button>
+    <button id="add-player-btn" class="btn-ghost" style="width:100%;font-size:0.95rem;padding:0.8rem;margin-bottom:1rem">+ Add Player to Session</button>
 
     <!-- History of recorded buy-ins -->
     <div class="card" style="padding:1rem;margin-bottom:1rem">
@@ -663,18 +670,31 @@ function showTrackingView(el) {
 
   document.getElementById('record-btn').addEventListener('click', () => showRecordBuyinDialog(buyins));
 
+  document.getElementById('add-player-btn').addEventListener('click', () => showAddPlayerDialog(buyins));
+
   document.getElementById('end-btn').addEventListener('click', () => showEndView(document.getElementById('page')));
 
   document.getElementById('cancel-btn').addEventListener('click', ()=>{
     const btn=document.getElementById('cancel-btn');
     btn.outerHTML=`
-      <div id="cancel-confirm" style="display:flex;gap:0.5rem;align-items:center">
-        <span style="flex:1;font-size:0.8rem;color:var(--text2)">Cancel session? All tracking lost.</span>
-        <button id="cancel-yes" class="btn-red" style="padding:0.625rem 1rem;font-size:0.875rem">Yes</button>
-        <button id="cancel-no" class="btn-ghost" style="padding:0.625rem 1rem;font-size:0.875rem">No</button>
+      <div id="cancel-confirm" class="card" style="padding:1rem;display:flex;flex-direction:column;gap:0.75rem">
+        <span style="font-size:0.8rem;color:var(--text2)">Cancel session? All tracking lost. Enter the session passcode to confirm.</span>
+        <input type="password" id="cancel-passcode" inputmode="numeric" maxlength="4" placeholder="••••"
+          class="inp" style="display:block;width:100%;padding:0.75rem;font-size:1.25rem;letter-spacing:0.3em;font-weight:700;text-align:center;color:var(--text)" />
+        <p id="cancel-pass-err" style="display:none;color:var(--neg);font-size:0.8rem;margin:0">Wrong passcode, try again.</p>
+        <div style="display:flex;gap:0.5rem">
+          <button id="cancel-yes" class="btn-red" style="flex:1;padding:0.625rem 1rem;font-size:0.875rem">Yes, Cancel</button>
+          <button id="cancel-no" class="btn-ghost" style="flex:1;padding:0.625rem 1rem;font-size:0.875rem">No</button>
+        </div>
       </div>`;
     document.getElementById('cancel-no').addEventListener('click',()=>showTrackingView(document.getElementById('page')));
     document.getElementById('cancel-yes').addEventListener('click', async ()=>{
+      const passErr=document.getElementById('cancel-pass-err');
+      if (document.getElementById('cancel-passcode').value.trim()!==String(activeSessionData.passcode)) {
+        passErr.style.display='block';
+        document.getElementById('cancel-passcode').value='';
+        return;
+      }
       await db.from('active_session').delete().eq('id',activeSessionData.id);
       activeSessionData=null;
       navigate('new-session');
@@ -768,6 +788,99 @@ function showRecordBuyinDialog(buyins) {
   });
 }
 
+// Modal to add a player who joins mid-session. Unlike New Game (everyone starts
+// with exactly 1 buy-in), a late joiner can start with any positive buy-in count.
+// Offers only roster players not already in the session, and gates on the passcode.
+function showAddPlayerDialog(buyins) {
+  const present=new Set(buyins.map(b=>b.player_name));
+  const roster=(ALL_PLAYER_ROWS.length>0?ALL_PLAYER_ROWS.filter(p=>p.active).map(p=>p.name):PLAYERS);
+  const available=roster.filter(p=>!present.has(p));
+
+  if (available.length===0) { showToast('Everyone is already in this session','#e53e3e'); return; }
+
+  const overlay=document.createElement('div');
+  overlay.style.cssText='position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,0.6);display:flex;align-items:flex-end;justify-content:center;padding:0';
+  overlay.innerHTML=`
+    <div class="card fade-in" style="width:100%;max-width:672px;border-radius:1rem 1rem 0 0;padding:1.25rem 1rem 1.5rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
+        <h3 style="font-size:1.2rem;font-weight:900;margin:0">Add Player</h3>
+        <button id="ap-close" class="btn-ghost" style="width:2rem;height:2rem;padding:0;font-size:1.1rem;display:flex;align-items:center;justify-content:center">✕</button>
+      </div>
+
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Player</label>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.5rem;margin-bottom:1rem" id="ap-players">
+        ${available.map(p=>`<button type="button" data-ap-p="${p}" class="player-pill" style="padding:0.65rem 0.5rem;font-size:0.85rem;text-align:center">${p}</button>`).join('')}
+      </div>
+
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Starting Buy-ins</label>
+      <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem">
+        <input type="text" inputmode="decimal" id="ap-qty" value="1"
+          class="inp" style="flex:1;min-width:0;padding:0.75rem;font-size:1.2rem;font-weight:700;text-align:center;color:var(--text)" />
+        <div style="font-size:0.85rem;color:var(--text2);width:5.5rem;text-align:right;flex-shrink:0">₹<span id="ap-rs">${BUYIN_VALUE}</span></div>
+      </div>
+
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Session Passcode</label>
+      <input type="password" id="ap-passcode" inputmode="numeric" maxlength="4" placeholder="••••"
+        class="inp" style="display:block;width:100%;padding:0.75rem;font-size:1.2rem;letter-spacing:0.3em;font-weight:700;text-align:center;color:var(--text);margin-bottom:0.5rem" />
+      <p id="ap-err" style="display:none;color:var(--neg);font-size:0.8rem;margin:0 0 0.5rem">Wrong passcode, try again.</p>
+
+      <button id="ap-save" class="btn-red" style="width:100%;font-size:1.05rem;padding:0.9rem">Add Player</button>
+    </div>`;
+  document.body.appendChild(overlay);
+
+  let selectedPlayer=null;
+  function close(){ overlay.remove(); }
+  function refreshRs(){
+    const q=parseFloat(document.getElementById('ap-qty').value)||0;
+    document.getElementById('ap-rs').textContent=(q*BUYIN_VALUE).toLocaleString('en-IN');
+  }
+
+  overlay.addEventListener('click', e=>{ if(e.target===overlay) close(); });
+  document.getElementById('ap-close').addEventListener('click', close);
+  document.getElementById('ap-qty').addEventListener('input', refreshRs);
+
+  overlay.querySelectorAll('[data-ap-p]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      selectedPlayer=btn.dataset.apP;
+      overlay.querySelectorAll('[data-ap-p]').forEach(x=>x.classList.toggle('selected', x===btn));
+    });
+  });
+
+  document.getElementById('ap-save').addEventListener('click', async ()=>{
+    const err=document.getElementById('ap-err');
+    if (!selectedPlayer) { showToast('Pick a player','#e53e3e'); return; }
+    const qty=parseFloat(document.getElementById('ap-qty').value);
+    if (!(qty>0)) { showToast('Starting buy-ins must be greater than 0','#e53e3e'); return; }
+    if (document.getElementById('ap-passcode').value.trim()!==String(activeSessionData.passcode)) {
+      err.style.display='block';
+      document.getElementById('ap-passcode').value='';
+      return;
+    }
+    err.style.display='none';
+    const btn=document.getElementById('ap-save');
+    btn.textContent='Adding…'; btn.disabled=true;
+
+    // Add the player's buy-in row for this session.
+    const {data:biRow,error:biErr}=await db.from('active_session_buyins')
+      .insert({active_session_id:activeSessionData.id, player_name:selectedPlayer, buyins:qty})
+      .select().single();
+    if (biErr) { showToast('Error adding player','#e53e3e'); btn.textContent='Add Player'; btn.disabled=false; return; }
+
+    // Log the join as a buy-in ledger entry so the history reflects it.
+    const {data:logRow,error:logErr}=await db.from('active_session_buyin_log')
+      .insert({active_session_id:activeSessionData.id, player_name:selectedPlayer, amount:qty})
+      .select().single();
+    if (logErr) { showToast('Player added, but logging failed','#f59e0b'); }
+
+    (activeSessionData.active_session_buyins ||= []).push(biRow);
+    if (logRow) (activeSessionData.active_session_buyin_log ||= []).push(logRow);
+
+    showToast(`${selectedPlayer} joined with ${qty} buy-in${qty>1?'s':''} 🎉`);
+    close();
+    showTrackingView(document.getElementById('page'));
+  });
+}
+
 function showEndView(el) {
   const s=activeSessionData;
   const buyins=(s.active_session_buyins||[]).slice().sort((a,b)=>a.player_name.localeCompare(b.player_name));
@@ -797,6 +910,13 @@ function showEndView(el) {
 
     <div id="end-hint" style="display:none;font-size:0.875rem;padding:0.75rem 1rem;border-radius:0.75rem;margin-bottom:0.75rem;background:rgba(245,158,11,0.1);color:#f59e0b;border:1px solid rgba(245,158,11,0.25)">
       ⚠️ <span id="end-hint-text"></span>
+    </div>
+
+    <div class="card" style="padding:1rem;margin-bottom:1rem">
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Session Passcode</label>
+      <input type="password" id="end-passcode" inputmode="numeric" maxlength="4" placeholder="••••"
+        class="inp" style="display:block;width:100%;padding:0.75rem;font-size:1.25rem;letter-spacing:0.3em;font-weight:700;text-align:center;color:var(--text)" />
+      <p id="end-pass-err" style="display:none;color:var(--neg);font-size:0.8rem;margin:0.5rem 0 0">Wrong passcode, try again.</p>
     </div>
 
     <button id="save-end-btn" class="btn-red" style="width:100%;font-size:1.125rem;padding:1rem;margin-bottom:0.75rem">Save Session</button>
@@ -838,6 +958,14 @@ function showEndView(el) {
     }
     const diff=calcNets();
     if (Math.abs(diff)>0.01) { showToast(`Nets must sum to 0 (now ${diff>0?'+':''}${diff.toFixed(2)}) — recheck`,'#e53e3e'); return; }
+
+    const passErr=document.getElementById('end-pass-err');
+    if (document.getElementById('end-passcode').value.trim()!==String(activeSessionData.passcode)) {
+      passErr.style.display='block';
+      document.getElementById('end-passcode').value='';
+      return;
+    }
+    passErr.style.display='none';
 
     const results=buyins.map(b=>{
       const finalBi=parseFloat(document.getElementById('final-'+b.id).value)||0;
@@ -881,6 +1009,15 @@ async function loadHistory() {
   bindHistoryActions();
 }
 
+// Sessions freeze 24h after they were created — no more edits or deletes.
+// Prefer created_at (a real timestamp); fall back to the session date at midnight.
+const LOCK_WINDOW_MS = 24 * 60 * 60 * 1000;
+function isSessionLocked(s) {
+  const ref = s.created_at ? new Date(s.created_at) : new Date(s.date + 'T00:00:00');
+  if (isNaN(ref.getTime())) return false;
+  return Date.now() - ref.getTime() > LOCK_WINDOW_MS;
+}
+
 function renderSessionCard(s, editing=false) {
   const results=(s.session_results||[]).sort((a,b)=>b.buyins-a.buyins);
   const rows=results.map(r=>{
@@ -900,7 +1037,11 @@ function renderSessionCard(s, editing=false) {
     </div>`;
   }).join('');
 
-  const btns=editing?`
+  const locked=isSessionLocked(s);
+  const btns=locked?`
+    <div style="display:flex;align-items:center;justify-content:center;gap:0.4rem;margin-top:0.75rem;font-size:0.8rem;color:var(--text2)">
+      🔒 <span>Locked — 24h edit window has passed</span>
+    </div>`:editing?`
     <div style="display:flex;gap:0.5rem;margin-top:0.75rem">
       <button data-save-session="${s.id}" class="btn-red" style="flex:1;padding:0.625rem;font-size:0.875rem">Save</button>
       <button data-cancel-session="${s.id}" class="btn-ghost" style="flex:1;padding:0.625rem;font-size:0.875rem">Cancel</button>
@@ -940,6 +1081,8 @@ function bindHistoryActions() {
   document.querySelectorAll('[data-save-session]').forEach(btn=>{
     btn.addEventListener('click', async ()=>{
       const id=btn.dataset.saveSession;
+      const {data:sLock}=await db.from('sessions').select('created_at,date').eq('id',id).single();
+      if (sLock && isSessionLocked(sLock)) { showToast('Session is locked — 24h edit window has passed','#e53e3e'); await loadHistory(); return; }
       const inputs=document.querySelectorAll(`#session-card-${id} .edit-input`);
       let sum=0; const updates=[];
       inputs.forEach(inp=>{ const v=parseFloat(inp.value)||0; sum+=v; updates.push({id:inp.dataset.resultId,buyins:v}); });
@@ -965,6 +1108,8 @@ function bindHistoryActions() {
         bindHistoryActions();
       });
       btnsDiv.querySelector(`[data-confirm-delete]`).addEventListener('click', async ()=>{
+        const {data:sLock}=await db.from('sessions').select('created_at,date').eq('id',id).single();
+        if (sLock && isSessionLocked(sLock)) { showToast('Session is locked — 24h edit window has passed','#e53e3e'); await loadHistory(); return; }
         const {error}=await db.from('sessions').delete().eq('id',id);
         if (error) { showToast('Delete failed: '+error.message,'#e53e3e'); return; }
         showToast('Deleted','#6b7280');
@@ -1007,13 +1152,15 @@ async function renderProfile(el, player) {
     .filter(r=>r.date)
     .sort((a,b)=>a.date.localeCompare(b.date));
 
-  const bi=sessions.map(s=>s.buyins);
-  const total=bi.reduce((a,b)=>a+b,0);
+  // total & the cumulative graph keep the historical seed; per-session stats drop it.
+  const total=sessions.reduce((a,s)=>a+s.buyins,0);
+  const realSessions=sessions.filter(s=>!isHistoricalDate(s.date));
+  const bi=realSessions.map(s=>s.buyins);
   const count=bi.length;
   const wins=bi.filter(v=>v>0).length;
-  const winRate=Math.round((wins/count)*100);
-  const bigWin=Math.max(...bi);
-  const bigLoss=Math.min(...bi);
+  const winRate=count?Math.round((wins/count)*100):0;
+  const bigWin=count?Math.max(...bi):0;
+  const bigLoss=count?Math.min(...bi):0;
 
   let streak=0, streakType='';
   for (let i=bi.length-1;i>=0;i--) {
@@ -1022,9 +1169,9 @@ async function renderProfile(el, player) {
     else if((streakType==='win'&&isW)||(streakType==='loss'&&!isW))streak++;
     else break;
   }
-  const streakLabel=streak===1?(streakType==='win'?'1 Win':'1 Loss'):`${streak} ${streakType==='win'?'Wins':'Losses'} in a row`;
-  const streakColor=streakType==='win'?'var(--green)':'var(--neg)';
-  const streakIcon=streakType==='win'?'🔥':'❄️';
+  const streakLabel=streak===0?'—':streak===1?(streakType==='win'?'1 Win':'1 Loss'):`${streak} ${streakType==='win'?'Wins':'Losses'} in a row`;
+  const streakColor=streak===0?'var(--text2)':streakType==='win'?'var(--green)':'var(--neg)';
+  const streakIcon=streak===0?'🂠':streakType==='win'?'🔥':'❄️';
 
   let running=0;
   const cumulative=sessions.map(s=>{running+=s.buyins;return{date:s.date,value:running};});
@@ -1107,6 +1254,8 @@ async function renderAwards(el) {
   const pData={};
   allNames.forEach(p=>pData[p]=[]);
   (results||[]).forEach(r=>{
+    // Awards never count the historical accumulation seed.
+    if (isHistoricalDate(sessionMap[r.session_id])) return;
     if (!pData[r.player_name]) pData[r.player_name]=[];
     pData[r.player_name].push({buyins:Number(r.buyins),date:sessionMap[r.session_id]||'',sessionId:r.session_id});
   });
@@ -1189,10 +1338,22 @@ async function renderAwards(el) {
 // ── PLAYERS PAGE ──────────────────────────────────────────────────────────────
 async function renderPlayersPage(el) {
   el.innerHTML=`<div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
-    <h2 style="font-size:1.5rem;font-weight:900;margin-bottom:0.25rem">👥 Players</h2>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.25rem">
+      <h2 style="font-size:1.5rem;font-weight:900;margin:0">👥 Players</h2>
+      <button id="toggle-add-player" class="btn-red" style="padding:0.5rem 1rem;font-size:0.85rem;font-weight:700">+ Add Player</button>
+    </div>
     <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">Manage your group</p>
     <div id="players-body"><p style="color:var(--text2);text-align:center;padding:3rem 0">Loading…</p></div>
   </div>`;
+
+  document.getElementById('toggle-add-player').addEventListener('click', ()=>{
+    const box=document.getElementById('add-player-box');
+    if (!box) return;
+    const showing=box.style.display!=='none';
+    box.style.display=showing?'none':'block';
+    if (!showing) document.getElementById('new-player-name')?.focus();
+  });
+
   await loadPlayersPage();
 }
 
@@ -1211,7 +1372,7 @@ async function loadPlayersPage() {
   const retired=players.filter(p=>!p.active);
 
   body.innerHTML=`
-    <div class="card" style="padding:1rem;margin-bottom:1.25rem">
+    <div id="add-player-box" class="card" style="padding:1rem;margin-bottom:1.25rem;display:none">
       <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">Add New Player</div>
       <input type="text" id="new-player-name" class="inp" placeholder="Player name" style="display:block;width:100%;padding:0.75rem;font-size:0.9rem;margin-bottom:0.75rem" maxlength="20" />
       <div style="font-size:0.75rem;color:var(--text2);margin-bottom:0.5rem">Pick a colour</div>
@@ -1219,7 +1380,7 @@ async function loadPlayersPage() {
         ${COLOR_PRESETS.map(c=>`<button type="button" data-ac="${c}" class="color-swatch" style="width:2rem;height:2rem;border-radius:50%;background:${c};border:2px solid transparent;cursor:pointer"></button>`).join('')}
       </div>
       <input type="hidden" id="new-player-color" value="${COLOR_PRESETS[0]}" />
-      <button id="add-player-btn" class="btn-red" style="width:100%;padding:0.75rem;font-size:0.9rem">+ Add Player</button>
+      <button id="add-player-submit" class="btn-red" style="width:100%;padding:0.75rem;font-size:0.9rem">+ Add Player</button>
     </div>
 
     <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Active (${active.length})</div>
@@ -1238,11 +1399,11 @@ async function loadPlayersPage() {
     s.addEventListener('click',()=>selectAddColor(s.dataset.ac));
   });
 
-  document.getElementById('add-player-btn').addEventListener('click', async ()=>{
+  document.getElementById('add-player-submit').addEventListener('click', async ()=>{
     const name=document.getElementById('new-player-name').value.trim();
     const color=document.getElementById('new-player-color').value;
     if (!name){showToast('Enter a player name','#e53e3e');return;}
-    const btn=document.getElementById('add-player-btn');
+    const btn=document.getElementById('add-player-submit');
     btn.textContent='Adding…';btn.disabled=true;
     const {error}=await db.from('players').insert({name,color});
     if (error){
