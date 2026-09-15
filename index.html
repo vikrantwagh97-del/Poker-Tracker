@@ -368,6 +368,7 @@ function render() {
   else if (currentPage === 'history')        renderHistory(page);
   else if (currentPage === 'awards')         renderAwards(page);
   else if (currentPage === 'players')        renderPlayersPage(page);
+  else if (currentPage === 'events')         renderEventsPage(page);
   else if (isProfile)                        renderProfile(page, currentPage.slice(8));
   else renderLeaderboard(page);
   bindNav();
@@ -420,6 +421,7 @@ function bindLogin() {
 function renderNav() {
   const active = currentPage.startsWith('profile-') ? 'leaderboard'
                : currentPage === 'active-session'   ? 'new-session'
+               : currentPage.startsWith('event-')   ? 'events'
                : currentPage;
   const tabs = [
     { id:'leaderboard', label:'🏆 Board' },
@@ -427,6 +429,7 @@ function renderNav() {
     { id:'history',      label:'📋 History' },
     { id:'awards',       label:'🎖️ Awards' },
     { id:'players',      label:'👥 Players' },
+    { id:'events',       label:'🎯 Events' },
   ];
   return `<div class="nav-bar">
     <div style="max-width:672px;margin:0 auto;padding:0.4rem 0.25rem;display:flex;gap:0.2rem">
@@ -1618,6 +1621,164 @@ function showEditRow(p) {
     }
     await loadPlayersPage();
   });
+}
+
+// ── EVENTS PAGE ───────────────────────────────────────────────────────────────
+async function renderEventsPage(el) {
+  el.innerHTML = `<div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem">
+      <div>
+        <div style="font-size:1.5rem;font-weight:800;display:flex;align-items:center;gap:0.5rem">🎯 Events</div>
+        <div style="color:var(--text2);font-size:0.85rem">Special poker series & trips</div>
+      </div>
+      <button id="create-event-btn" class="btn-red" style="padding:0.6rem 1.1rem;font-size:0.9rem">+ New Event</button>
+    </div>
+    <div id="events-list"><div style="color:var(--text2);text-align:center;padding:2rem">Loading…</div></div>
+    <div id="event-create-panel" style="display:none" class="card" style="padding:1.25rem;margin-bottom:1rem">
+    </div>
+  </div>`;
+
+  document.getElementById('create-event-btn').addEventListener('click', () => {
+    const panel = document.getElementById('event-create-panel');
+    if (panel.style.display !== 'none') { panel.style.display='none'; return; }
+    panel.style.display = 'block';
+    panel.innerHTML = `
+      <div style="padding:1.25rem">
+        <div style="font-weight:700;margin-bottom:1rem;font-size:1rem">Create New Event</div>
+        <input id="new-event-name" class="inp" placeholder="Event name (e.g. Wayanad Series)" style="width:100%;padding:0.65rem 0.9rem;font-size:0.95rem;margin-bottom:1rem" />
+        <div style="font-weight:600;font-size:0.85rem;color:var(--text2);margin-bottom:0.5rem">SELECT PLAYERS</div>
+        <div id="event-player-pills" style="display:flex;flex-wrap:wrap;gap:0.5rem;margin-bottom:1rem">
+          ${(ALL_PLAYER_ROWS.length>0?ALL_PLAYER_ROWS.filter(p=>p.active!==false):PLAYERS.map(n=>({name:n}))).map(p=>`
+            <button class="player-pill event-ppill" data-name="${p.name}" style="padding:0.4rem 0.85rem;font-size:0.8rem">${p.name}</button>
+          `).join('')}
+        </div>
+        <button id="save-event-btn" class="btn-red" style="width:100%;padding:0.7rem;font-size:0.95rem">Create Event</button>
+      </div>`;
+    panel.querySelectorAll('.event-ppill').forEach(b => b.addEventListener('click', () => b.classList.toggle('selected')));
+    document.getElementById('save-event-btn').addEventListener('click', async () => {
+      const name = document.getElementById('new-event-name').value.trim();
+      if (!name) { showToast('Enter event name','#e53e3e'); return; }
+      const selected = [...panel.querySelectorAll('.event-ppill.selected')].map(b=>b.dataset.name);
+      if (selected.length < 1) { showToast('Select at least one player','#e53e3e'); return; }
+      const btn = document.getElementById('save-event-btn');
+      btn.textContent='Creating…'; btn.disabled=true;
+      const {data:ev, error} = await db.from('events').insert({name, status:'active'}).select().single();
+      if (error) { showToast('Error creating event','#e53e3e'); btn.textContent='Create Event'; btn.disabled=false; return; }
+      const playerRows = selected.map(pn=>({event_id:ev.id, player_name:pn}));
+      await db.from('event_players').insert(playerRows);
+      showToast('Event created!','#3fb950');
+      panel.style.display='none';
+      await loadEventsList();
+    });
+  });
+
+  await loadEventsList();
+
+  async function loadEventsList() {
+    const listEl = document.getElementById('events-list');
+    if (!listEl) return;
+    const {data:events} = await db.from('events').select('*').order('created_at',{ascending:false});
+    if (!events || events.length===0) {
+      listEl.innerHTML=`<div class="card" style="padding:2rem;text-align:center;color:var(--text2)">No events yet. Create one above!</div>`;
+      return;
+    }
+    const active = events.filter(e=>e.status==='active');
+    const ended  = events.filter(e=>e.status==='ended');
+
+    let html = '';
+    if (active.length>0) {
+      html += `<div style="font-size:0.7rem;font-weight:700;color:var(--text2);letter-spacing:0.08em;margin-bottom:0.5rem">ACTIVE (${active.length})</div>`;
+      for (const ev of active) html += await eventCardHTML(ev);
+    }
+    if (ended.length>0) {
+      html += `<div style="font-size:0.7rem;font-weight:700;color:var(--text2);letter-spacing:0.08em;margin:1rem 0 0.5rem">ENDED (${ended.length})</div>`;
+      for (const ev of ended) html += await eventCardHTML(ev);
+    }
+    listEl.innerHTML = html;
+
+    listEl.querySelectorAll('[data-end-event]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const id = btn.dataset.endEvent;
+        const conf = document.getElementById('end-conf-'+id);
+        conf.style.display = conf.style.display==='none'?'block':'none';
+      });
+    });
+    listEl.querySelectorAll('[data-end-confirm]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.endConfirm;
+        await db.from('events').update({status:'ended'}).eq('id',id);
+        showToast('Event ended','#3fb950');
+        await loadEventsList();
+      });
+    });
+    listEl.querySelectorAll('[data-reopen-event]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        await db.from('events').update({status:'active'}).eq('id',btn.dataset.reopenEvent);
+        showToast('Event reopened','#3fb950');
+        await loadEventsList();
+      });
+    });
+    listEl.querySelectorAll('[data-event-summary]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.dataset.eventSummary;
+        const summaryEl = document.getElementById('summary-'+id);
+        if (summaryEl.style.display!=='none') { summaryEl.style.display='none'; return; }
+        summaryEl.innerHTML = '<div style="color:var(--text2);padding:0.5rem">Loading…</div>';
+        summaryEl.style.display='block';
+        summaryEl.innerHTML = await buildEventSummaryHTML(id);
+      });
+    });
+  }
+
+  async function eventCardHTML(ev) {
+    const {data:players} = await db.from('event_players').select('player_name').eq('event_id',ev.id);
+    const playerNames = (players||[]).map(p=>p.player_name);
+    const isActive = ev.status==='active';
+    return `<div class="card" style="margin-bottom:0.75rem;padding:1.1rem 1.25rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem">
+        <div>
+          <div style="font-weight:700;font-size:1rem">${ev.name}</div>
+          <div style="font-size:0.75rem;color:var(--text2);margin-top:0.2rem">${playerNames.join(', ')||'No players'}</div>
+        </div>
+        <span style="font-size:0.7rem;font-weight:700;padding:0.25rem 0.65rem;border-radius:999px;background:${isActive?'rgba(63,185,80,0.15)':'var(--bg3)'};color:${isActive?'var(--green)':'var(--text2)'};">${isActive?'Active':'Ended'}</span>
+      </div>
+      <div style="margin-top:0.85rem;display:flex;gap:0.5rem;flex-wrap:wrap">
+        ${isActive ? `
+          <button data-end-event="${ev.id}" class="btn-ghost" style="padding:0.4rem 0.8rem;font-size:0.8rem">End Event</button>
+        ` : `
+          <button data-reopen-event="${ev.id}" class="btn-ghost" style="padding:0.4rem 0.8rem;font-size:0.8rem">Reopen</button>
+        `}
+        <button data-event-summary="${ev.id}" class="btn-ghost" style="padding:0.4rem 0.8rem;font-size:0.8rem">📊 Stats</button>
+      </div>
+      ${isActive ? `<div id="end-conf-${ev.id}" style="display:none;margin-top:0.75rem;background:var(--bg3);border-radius:0.65rem;padding:0.75rem">
+        <div style="font-size:0.85rem;margin-bottom:0.5rem;color:var(--text2)">End this event? This will lock it.</div>
+        <button data-end-confirm="${ev.id}" class="btn-red" style="padding:0.4rem 1rem;font-size:0.8rem">Yes, End Event</button>
+      </div>` : ''}
+      <div id="summary-${ev.id}" style="display:none;margin-top:0.75rem"></div>
+    </div>`;
+  }
+
+  async function buildEventSummaryHTML(eventId) {
+    const {data:epRows} = await db.from('event_players').select('player_name').eq('event_id',eventId);
+    const playerNames = (epRows||[]).map(r=>r.player_name);
+    const {data:esRows} = await db.from('event_sessions').select('session_id').eq('event_id',eventId);
+    const sessionIds = (esRows||[]).map(r=>r.session_id);
+    if (sessionIds.length===0) return `<div style="color:var(--text2);font-size:0.85rem">No sessions linked to this event yet.</div>`;
+    const {data:results} = await db.from('session_results').select('*').in('session_id',sessionIds);
+    const totals = {};
+    playerNames.forEach(n=>totals[n]=0);
+    (results||[]).forEach(r=>{ if(totals[r.player_name]!==undefined) totals[r.player_name]+=Number(r.buyins); });
+    const sorted = Object.entries(totals).sort((a,b)=>b[1]-a[1]);
+    if (sorted.length===0) return `<div style="color:var(--text2);font-size:0.85rem">No results yet.</div>`;
+    return `<div style="border-top:1px solid var(--border);padding-top:0.75rem">
+      <div style="font-size:0.75rem;font-weight:700;color:var(--text2);margin-bottom:0.5rem">EVENT STANDINGS (${sessionIds.length} session${sessionIds.length!==1?'s':''})</div>
+      ${sorted.map(([name,buyins],i)=>`
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:0.4rem 0;${i<sorted.length-1?'border-bottom:1px solid var(--border)':''}">
+          <span style="font-weight:600">${name}</span>
+          <span style="font-weight:700;color:${buyins>0?'var(--green)':buyins<0?'var(--neg)':'var(--text2)'}">${buyins>0?'+':''}${buyins.toFixed(1)} buy-ins</span>
+        </div>`).join('')}
+    </div>`;
+  }
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
