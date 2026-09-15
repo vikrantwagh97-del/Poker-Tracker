@@ -470,7 +470,6 @@ async function renderLeaderboard(el) {
   allNames.forEach(p => totals[p] = 0);
   (results||[]).forEach(r => {
     if (totals[r.player_name] !== undefined) totals[r.player_name] += Number(r.buyins);
-    else totals[r.player_name] = Number(r.buyins); // catch any legacy names
   });
   const sorted = Object.entries(totals).sort((a,b) => b[1]-a[1]);
   const medals = ['🥇','🥈','🥉'];
