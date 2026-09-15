@@ -762,6 +762,7 @@ function showTrackingView(el) {
       }
       await db.from('active_session').delete().eq('id',activeSessionData.id);
       activeSessionData=null;
+      sessionStorage.removeItem('pending_event_id');
       navigate('new-session');
     });
   });
@@ -1047,6 +1048,14 @@ function showEndView(el) {
     if (rErr) { showToast('Error saving results','#e53e3e'); btn.textContent='Save Session'; btn.disabled=false; return; }
 
     await db.from('active_session').delete().eq('id',activeSessionData.id);
+
+    // Link session to event if one was active when this session started
+    const pendingEventId = sessionStorage.getItem('pending_event_id');
+    if (pendingEventId) {
+      await db.from('event_sessions').insert({event_id:pendingEventId, session_id:session.id});
+      sessionStorage.removeItem('pending_event_id');
+    }
+
     activeSessionData=null;
     showToast('Session saved! 🎉');
     setTimeout(()=>navigate('history'),800);
@@ -1696,6 +1705,12 @@ async function renderEventsPage(el) {
     }
     listEl.innerHTML = html;
 
+    listEl.querySelectorAll('[data-start-event-session]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        sessionStorage.setItem('pending_event_id', btn.dataset.startEventSession);
+        navigate('new-session');
+      });
+    });
     listEl.querySelectorAll('[data-end-event]').forEach(btn => {
       btn.addEventListener('click', () => {
         const id = btn.dataset.endEvent;
@@ -1744,6 +1759,7 @@ async function renderEventsPage(el) {
       </div>
       <div style="margin-top:0.85rem;display:flex;gap:0.5rem;flex-wrap:wrap">
         ${isActive ? `
+          <button data-start-event-session="${ev.id}" class="btn-red" style="padding:0.4rem 0.9rem;font-size:0.8rem">▶ Start Session</button>
           <button data-end-event="${ev.id}" class="btn-ghost" style="padding:0.4rem 0.8rem;font-size:0.8rem">End Event</button>
         ` : `
           <button data-reopen-event="${ev.id}" class="btn-ghost" style="padding:0.4rem 0.8rem;font-size:0.8rem">Reopen</button>
