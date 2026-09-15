@@ -590,7 +590,7 @@ function bindNewSessionStart() {
     const btn=document.getElementById('start-btn');
     btn.textContent='Starting…'; btn.disabled=true;
 
-    const {data:session,error:sErr}=await db.from('active_session').insert({date,passcode}).select().single();
+    const {data:session,error:sErr}=await db.from('active_session').insert({date,passcode,started_at:new Date().toISOString()}).select().single();
     if (sErr) { showToast('Error starting session','#e53e3e'); btn.textContent='Start Session →'; btn.disabled=false; return; }
 
     // Everyone starts with 1 buy-in; further buy-ins are recorded during the session.
@@ -1049,7 +1049,7 @@ function showEndView(el) {
     const btn=document.getElementById('save-end-btn');
     btn.textContent='Saving…'; btn.disabled=true;
 
-    const {data:session,error:sErr}=await db.from('sessions').insert({date:activeSessionData.date}).select().single();
+    const {data:session,error:sErr}=await db.from('sessions').insert({date:activeSessionData.date,started_at:activeSessionData.created_at,ended_at:new Date().toISOString()}).select().single();
     if (sErr) { showToast('Error saving','#e53e3e'); btn.textContent='Save Session'; btn.disabled=false; return; }
     const {error:rErr}=await db.from('session_results').insert(results.map(r=>({session_id:session.id,...r})));
     if (rErr) { showToast('Error saving results','#e53e3e'); btn.textContent='Save Session'; btn.disabled=false; return; }
@@ -1219,7 +1219,7 @@ async function renderProfile(el, player) {
 
   const [{data:playerResults},{data:allSessions}]=await Promise.all([
     db.from('session_results').select('buyins,session_id').eq('player_name',player),
-    db.from('sessions').select('id,date').order('date',{ascending:true})
+    db.from('sessions').select('id,date,started_at,ended_at').order('date',{ascending:true})
   ]);
 
   if (!playerResults||playerResults.length===0) {
@@ -1227,9 +1227,9 @@ async function renderProfile(el, player) {
     return;
   }
 
-  const dateMap={}; (allSessions||[]).forEach(s=>dateMap[s.id]=s.date);
+  const sessionMap={}; (allSessions||[]).forEach(s=>sessionMap[s.id]=s);
   const sessions=playerResults
-    .map(r=>({buyins:Number(r.buyins),date:dateMap[r.session_id]||''}))
+    .map(r=>({buyins:Number(r.buyins),date:sessionMap[r.session_id]?.date||'',started_at:sessionMap[r.session_id]?.started_at,ended_at:sessionMap[r.session_id]?.ended_at}))
     .filter(r=>r.date)
     .sort((a,b)=>a.date.localeCompare(b.date));
 
@@ -1250,6 +1250,18 @@ async function renderProfile(el, player) {
     else if((streakType==='win'&&isW)||(streakType==='loss'&&!isW))streak++;
     else break;
   }
+  // Win/loss per hour — only sessions with both timestamps
+  const timedSessions = realSessions.filter(s=>s.started_at&&s.ended_at);
+  let perHourVal = null, perHourSince = null;
+  if (timedSessions.length > 0) {
+    const totalBuyins = timedSessions.reduce((a,s)=>a+s.buyins,0);
+    const totalHours  = timedSessions.reduce((a,s)=>a+(new Date(s.ended_at)-new Date(s.started_at))/3600000,0);
+    if (totalHours > 0) perHourVal = totalBuyins / totalHours;
+    // earliest timed session date
+    const earliest = timedSessions.map(s=>s.date).sort()[0];
+    perHourSince = earliest ? new Date(earliest).toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'2-digit'}) : null;
+  }
+
   const streakLabel=streak===0?'—':streak===1?(streakType==='win'?'1 Win':'1 Loss'):`${streak} ${streakType==='win'?'Wins':'Losses'} in a row`;
   const streakColor=streak===0?'var(--text2)':streakType==='win'?'var(--green)':'var(--neg)';
   const streakIcon=streak===0?'🂠':streakType==='win'?'🔥':'❄️';
@@ -1257,10 +1269,11 @@ async function renderProfile(el, player) {
   let running=0;
   const cumulative=sessions.map(s=>{running+=s.buyins;return{date:s.date,value:running};});
 
-  function statBox(label,value,cls){
+  function statBox(label,value,cls,subtitle){
     return `<div class="card2" style="padding:0.75rem">
       <div style="font-size:0.65rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.25rem">${label}</div>
       <div class="${cls}" style="font-size:1.25rem;font-weight:900">${value}</div>
+      ${subtitle?`<div style="font-size:0.6rem;color:var(--text2);margin-top:0.2rem">${subtitle}</div>`:''}
     </div>`;
   }
 
@@ -1272,6 +1285,10 @@ async function renderProfile(el, player) {
       ${statBox('Win Rate',`${winRate}%`,winRate>=50?'pos':'neg-clr')}
       ${statBox('Best Session',`+${bigWin.toFixed(2)} bi`,'pos')}
       ${statBox('Worst Session',`${bigLoss.toFixed(2)} bi`,'neg-clr')}
+      ${perHourVal!==null
+        ? statBox('Per Hour',`${perHourVal>=0?'+':''}${perHourVal.toFixed(2)} bi`,colorCls(perHourVal),perHourSince?`Since ${perHourSince}`:'')
+        : statBox('Per Hour','No data yet','neutral','Play a session to track')}
+      ${count>0 ? statBox('Avg Per Session',`${(total/count)>=0?'+':''}${(total/count).toFixed(2)} bi`,colorCls(total/count)) : ''}
     </div>
     <div class="card" style="padding:0.875rem;margin-bottom:1rem;display:flex;align-items:center;gap:0.75rem">
       <div style="font-size:1.75rem">${streakIcon}</div>
