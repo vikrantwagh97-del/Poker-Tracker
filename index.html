@@ -459,10 +459,17 @@ async function renderLeaderboard(el) {
 
   if (!db) { document.getElementById('lb-body').innerHTML = notConfiguredMsg('leaderboard'); return; }
 
-  const [{data:results},{data:sessions}] = await Promise.all([
+  const includeEvents = localStorage.getItem('lb_include_events') === '1';
+
+  const [{data:results},{data:sessions},{data:eventSessionRows}] = await Promise.all([
     db.from('session_results').select('player_name, buyins, session_id'),
-    db.from('sessions').select('id, date').order('date',{ascending:true})
+    db.from('sessions').select('id, date').order('date',{ascending:true}),
+    db.from('event_sessions').select('session_id')
   ]);
+
+  const eventSessionIds = new Set((eventSessionRows||[]).map(r=>r.session_id));
+  const filteredResults = includeEvents ? (results||[]) : (results||[]).filter(r=>!eventSessionIds.has(r.session_id));
+  const filteredSessions = includeEvents ? (sessions||[]) : (sessions||[]).filter(s=>!eventSessionIds.has(s.id));
 
   // Use all known players (DB rows if loaded, else fallback)
   const allNames = ALL_PLAYER_ROWS.length > 0
@@ -471,7 +478,7 @@ async function renderLeaderboard(el) {
 
   const totals = {};
   allNames.forEach(p => totals[p] = 0);
-  (results||[]).forEach(r => {
+  filteredResults.forEach(r => {
     if (totals[r.player_name] !== undefined) totals[r.player_name] += Number(r.buyins);
   });
   const sorted = Object.entries(totals).sort((a,b) => b[1]-a[1]);
@@ -496,14 +503,14 @@ async function renderLeaderboard(el) {
     </button>`;
   }).join('');
 
-  if (!sessions||sessions.length===0) return;
+  if (!filteredSessions||filteredSessions.length===0) return;
   const bySession = {};
-  (results||[]).forEach(r=>{ if(!bySession[r.session_id]) bySession[r.session_id]={}; bySession[r.session_id][r.player_name]=Number(r.buyins); });
-  const labels = sessions.map(s=>formatDateShort(s.date));
+  filteredResults.forEach(r=>{ if(!bySession[r.session_id]) bySession[r.session_id]={}; bySession[r.session_id][r.player_name]=Number(r.buyins); });
+  const labels = filteredSessions.map(s=>formatDateShort(s.date));
   const chartPlayers = ALL_PLAYER_ROWS.length > 0 ? ALL_PLAYER_ROWS.filter(p=>p.is_regular!==false).map(p=>p.name) : PLAYERS;
   const datasets = chartPlayers.map(player => {
     let running=0;
-    const data = sessions.map(s=>{ running+=(bySession[s.id]?.[player]||0); return running; });
+    const data = filteredSessions.map(s=>{ running+=(bySession[s.id]?.[player]||0); return running; });
     if (data.every(v=>v===0)) return null;
     return { label:player, data, borderColor:PLAYER_COLORS[player]||'#888', backgroundColor:'transparent', borderWidth:2, pointRadius:2, tension:0.3 };
   }).filter(Boolean);
@@ -1635,17 +1642,37 @@ function showEditRow(p) {
 // ── EVENTS PAGE ───────────────────────────────────────────────────────────────
 async function renderEventsPage(el) {
   el.innerHTML = `<div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem">
       <div>
         <div style="font-size:1.5rem;font-weight:800;display:flex;align-items:center;gap:0.5rem">🎯 Events</div>
         <div style="color:var(--text2);font-size:0.85rem">Special poker series & trips</div>
       </div>
       <button id="create-event-btn" class="btn-red" style="padding:0.6rem 1.1rem;font-size:0.9rem">+ New Event</button>
     </div>
+    <div class="card2" style="padding:0.75rem 1rem;margin-bottom:1.25rem;display:flex;align-items:center;justify-content:space-between;gap:1rem">
+      <div>
+        <div style="font-weight:600;font-size:0.85rem">Include event results in leaderboard</div>
+        <div style="font-size:0.72rem;color:var(--text2)">Off by default — event wins/losses excluded from Board</div>
+      </div>
+      <label style="position:relative;display:inline-block;width:2.75rem;height:1.5rem;flex-shrink:0">
+        <input type="checkbox" id="lb-events-toggle" ${localStorage.getItem('lb_include_events')==='1'?'checked':''} style="opacity:0;width:0;height:0;position:absolute" />
+        <span id="lb-events-track" style="position:absolute;inset:0;border-radius:9999px;cursor:pointer;transition:background 0.2s;background:${localStorage.getItem('lb_include_events')==='1'?'var(--green)':'var(--bg3)'};border:1px solid var(--border)">
+          <span id="lb-events-knob" style="position:absolute;top:0.2rem;left:${localStorage.getItem('lb_include_events')==='1'?'1.35rem':'0.2rem'};width:1.1rem;height:1.1rem;border-radius:50%;background:#fff;transition:left 0.2s"></span>
+        </span>
+      </label>
+    </div>
     <div id="events-list"><div style="color:var(--text2);text-align:center;padding:2rem">Loading…</div></div>
     <div id="event-create-panel" style="display:none" class="card" style="padding:1.25rem;margin-bottom:1rem">
     </div>
   </div>`;
+
+  document.getElementById('lb-events-toggle').addEventListener('change', function() {
+    const on = this.checked;
+    localStorage.setItem('lb_include_events', on ? '1' : '0');
+    document.getElementById('lb-events-track').style.background = on ? 'var(--green)' : 'var(--bg3)';
+    document.getElementById('lb-events-knob').style.left = on ? '1.35rem' : '0.2rem';
+    showToast(on ? 'Event results now included in leaderboard' : 'Event results excluded from leaderboard', on ? '#3fb950' : '#8b949e');
+  });
 
   document.getElementById('create-event-btn').addEventListener('click', () => {
     const panel = document.getElementById('event-create-panel');
