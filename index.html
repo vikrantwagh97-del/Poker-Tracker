@@ -1802,15 +1802,13 @@ async function renderEventsPage(el) {
   }
 
   async function buildEventSummaryHTML(eventId) {
-    const {data:epRows} = await db.from('event_players').select('player_name').eq('event_id',eventId);
-    const playerNames = (epRows||[]).map(r=>r.player_name);
     const {data:esRows} = await db.from('event_sessions').select('session_id').eq('event_id',eventId);
     const sessionIds = (esRows||[]).map(r=>r.session_id);
     if (sessionIds.length===0) return `<div style="color:var(--text2);font-size:0.85rem">No sessions linked to this event yet.</div>`;
     const {data:results} = await db.from('session_results').select('*').in('session_id',sessionIds);
     const totals = {};
-    playerNames.forEach(n=>totals[n]=0);
-    (results||[]).forEach(r=>{ if(totals[r.player_name]!==undefined) totals[r.player_name]+=Number(r.buyins); });
+    // Include all players who actually played in any event session
+    (results||[]).forEach(r=>{ if(totals[r.player_name]===undefined) totals[r.player_name]=0; totals[r.player_name]+=Number(r.buyins); });
     const sorted = Object.entries(totals).sort((a,b)=>b[1]-a[1]);
     if (sorted.length===0) return `<div style="color:var(--text2);font-size:0.85rem">No results yet.</div>`;
     return `<div style="border-top:1px solid var(--border);padding-top:0.75rem">
