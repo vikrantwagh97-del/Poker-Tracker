@@ -608,6 +608,184 @@ function bindNewSessionStart() {
   });
 }
 
+// ── SESSION PHOTOS ────────────────────────────────────────────────────────────
+// Photos are stored in this private Supabase Storage bucket, one folder per session id, and shown
+// through signed links. A saved session keeps its live session's id, so photos taken during play stay attached.
+const PHOTO_BUCKET = 'session-photos';
+const PHOTO_LINK_SECONDS = 24 * 60 * 60;
+let livePhotos = { sessionId: null, list: [], open: false };
+let historyPhotos = {};
+let openHistoryPhotos = new Set();
+
+function photoStore() { return db && db.storage ? db.storage.from(PHOTO_BUCKET) : null; }
+
+async function listSessionPhotos(sessionId) {
+  const store = photoStore();
+  if (!store) return [];
+  const { data, error } = await store.list(sessionId, { limit: 1000, sortBy: { column: 'name', order: 'asc' } });
+  if (error) throw error;
+  const files = (data || []).filter(f => f.id && !f.name.startsWith('.'));
+  if (!files.length) return [];
+  const { data: links, error: linkErr } = await store.createSignedUrls(files.map(f => `${sessionId}/${f.name}`), PHOTO_LINK_SECONDS);
+  if (linkErr) throw linkErr;
+  const urlByPath = Object.fromEntries((links || []).filter(l => l.signedUrl).map(l => [l.path, l.signedUrl]));
+  return files.map(f => {
+    const path = `${sessionId}/${f.name}`;
+    return { path, url: urlByPath[path], created_at: f.created_at };
+  }).filter(p => p.url);
+}
+
+// Downscale to `maxSide` px and re-encode as JPEG so uploads stay small. Keeps the original
+// if the browser can't decode it (e.g. HEIC outside Safari) or re-encoding doesn't shrink it.
+function compressPhoto(file, maxSide = 1600) {
+  return new Promise(resolve => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onerror = () => { URL.revokeObjectURL(url); resolve(file); };
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.naturalWidth * scale);
+      canvas.height = Math.round(img.naturalHeight * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(blob => resolve(blob && blob.size < file.size ? blob : file), 'image/jpeg', 0.82);
+    };
+    img.src = url;
+  });
+}
+
+async function uploadSessionPhotos(sessionId, files, onProgress) {
+  const store = photoStore();
+  let uploaded = 0, lastError = null;
+  for (const [i, file] of files.entries()) {
+    onProgress?.(i + 1, files.length);
+    const blob = await compressPhoto(file);
+    const type = blob.type || 'image/jpeg';
+    const ext = type === 'image/jpeg' ? 'jpg' : (type.split('/')[1] || 'img').replace(/\W/g, '');
+    const path = `${sessionId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const { error } = await store.upload(path, blob, { contentType: type });
+    if (error) lastError = error; else uploaded++;
+  }
+  return { uploaded, lastError };
+}
+
+async function removeSessionPhotos(sessionId) {
+  try {
+    const paths = (await listSessionPhotos(sessionId)).map(p => p.path);
+    if (paths.length) { const { error } = await photoStore().remove(paths); if (error) throw error; }
+  } catch(e) { console.warn('Could not remove session photos:', e); }
+}
+
+function photoStripHTML(photos) {
+  return `<div style="display:flex;gap:0.5rem;overflow-x:auto;padding-bottom:0.25rem">${photos.map((p, i) =>
+    `<img src="${p.url}" data-photo-index="${i}" alt="Session photo ${i + 1}" loading="lazy"
+      style="width:4.5rem;height:4.5rem;object-fit:cover;border-radius:0.6rem;flex-shrink:0;cursor:pointer;background:var(--bg3)" />`).join('')}</div>`;
+}
+
+// Photos stay folded behind a "📸 N photos ▾" button; thumbnails only load once it is opened.
+function collapsiblePhotosHTML(photos, open) {
+  const label = `📸 ${photos.length} photo${photos.length === 1 ? '' : 's'} ${open ? '▴' : '▾'}`;
+  return `<button data-photo-toggle class="btn-ghost" aria-expanded="${open}" style="padding:0.4rem 0.75rem;font-size:0.8rem">${label}</button>`
+    + (open ? `<div style="margin-top:0.5rem">${photoStripHTML(photos)}</div>` : '');
+}
+
+// Full-screen viewer: arrows, swipe or ‹ › to browse; Esc, ✕ or tapping the backdrop closes.
+// Passing onDelete adds a Delete button; it is called after a photo is removed.
+function openPhotoViewer(photos, startIndex, { onDelete } = {}) {
+  photos = photos.slice();
+  let i = startIndex;
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,0.97);display:flex;flex-direction:column';
+  const prevOverflow = document.body.style.overflow;
+  const close = () => { overlay.remove(); document.removeEventListener('keydown', onKey); document.body.style.overflow = prevOverflow; };
+  const go = step => { i = (i + step + photos.length) % photos.length; draw(); };
+  const navBtn = (dir, side, label) => `<button data-pv="${dir}" class="btn-ghost"
+    style="position:absolute;${side}:0.5rem;top:50%;transform:translateY(-50%);width:2.5rem;height:2.5rem;padding:0;font-size:1.4rem;opacity:0.85">${label}</button>`;
+  function draw() {
+    const p = photos[i];
+    overlay.innerHTML = `
+      <div style="display:flex;align-items:center;gap:0.5rem;padding:0.75rem 1rem">
+        <span id="pv-caption" style="flex:1;font-size:0.8rem;color:var(--text2)">${i + 1} / ${photos.length} · ${formatTime(p.created_at)}</span>
+        ${onDelete ? `<button data-pv="delete" class="btn-ghost" style="padding:0.4rem 0.75rem;font-size:0.8rem;color:var(--neg);border-color:rgba(248,81,73,0.25)">Delete</button>` : ''}
+        <button data-pv="close" class="btn-ghost" style="width:2.25rem;height:2.25rem;padding:0;font-size:1.1rem">✕</button>
+      </div>
+      <div data-pv="backdrop" style="flex:1;min-height:0;display:flex;align-items:center;justify-content:center;position:relative;padding:0 0.5rem 1rem">
+        <img src="${p.url}" alt="Session photo ${i + 1}" style="max-width:100%;max-height:100%;object-fit:contain;border-radius:0.5rem" />
+        ${photos.length > 1 ? navBtn('prev', 'left', '‹') + navBtn('next', 'right', '›') : ''}
+      </div>`;
+  }
+  function onKey(e) {
+    if (e.key === 'Escape') close();
+    else if (e.key === 'ArrowLeft' && photos.length > 1) go(-1);
+    else if (e.key === 'ArrowRight' && photos.length > 1) go(1);
+  }
+  overlay.addEventListener('click', async e => {
+    const action = e.target.dataset.pv;
+    if (action === 'close' || action === 'backdrop') close();
+    else if (action === 'prev') go(-1);
+    else if (action === 'next') go(1);
+    else if (action === 'delete') {
+      if (!confirm('Delete this photo?')) return;
+      const { error } = await photoStore().remove([photos[i].path]);
+      if (error) { showToast('Delete failed: ' + error.message, '#e53e3e'); return; }
+      photos.splice(i, 1);
+      showToast('Photo deleted', '#6b7280');
+      onDelete();
+      if (!photos.length) close(); else { i = Math.min(i, photos.length - 1); draw(); }
+    }
+  });
+  let touchX = null;
+  overlay.addEventListener('touchstart', e => { touchX = e.touches[0].clientX; }, { passive: true });
+  overlay.addEventListener('touchend', e => {
+    if (touchX === null || photos.length < 2) return;
+    const dx = e.changedTouches[0].clientX - touchX;
+    touchX = null;
+    if (Math.abs(dx) > 50) go(dx < 0 ? 1 : -1);
+  });
+  draw();
+  document.addEventListener('keydown', onKey);
+  document.body.style.overflow = 'hidden';
+  document.body.appendChild(overlay);
+}
+
+function livePhotosHTML() {
+  const { list, open } = livePhotos.sessionId === activeSessionData?.id ? livePhotos : { list: [], open: false };
+  return list.length ? collapsiblePhotosHTML(list, open)
+    : `<p style="color:var(--text2);font-size:0.85rem;text-align:center;padding:0.5rem 0;margin:0">No photos yet.</p>`;
+}
+
+async function refreshLivePhotos() {
+  const id = activeSessionData?.id;
+  if (!id) return;
+  let list;
+  try { list = await listSessionPhotos(id); } catch(e) { return; }
+  livePhotos = { sessionId: id, list, open: livePhotos.sessionId === id && livePhotos.open };
+  const el = document.getElementById('live-photos');
+  if (el && activeSessionData?.id === id) el.innerHTML = livePhotosHTML();
+}
+
+function historyPhotosHTML(sessionId) {
+  const list = historyPhotos[sessionId] || [];
+  return list.length ? `<div style="margin-top:0.75rem">${collapsiblePhotosHTML(list, openHistoryPhotos.has(sessionId))}</div>` : '';
+}
+
+async function refreshHistoryPhotos(sessionId, hasFolder = true) {
+  try { historyPhotos[sessionId] = hasFolder ? await listSessionPhotos(sessionId) : []; } catch(e) { return; }
+  const el = document.getElementById('photos-' + sessionId);
+  if (el) el.innerHTML = historyPhotosHTML(sessionId);
+}
+
+// One listing of the bucket root says which sessions have a photo folder; only those get listed.
+async function loadHistoryPhotos(sessions) {
+  const store = photoStore();
+  if (!store) return;
+  const { data: folders, error } = await store.list('', { limit: 1000 });
+  if (error) return;
+  const withPhotos = new Set((folders || []).filter(f => !f.id).map(f => f.name));
+  await Promise.all(sessions.map(s => refreshHistoryPhotos(s.id, withPhotos.has(s.id))));
+}
+
 // ── ACTIVE SESSION (live tracking) ────────────────────────────────────────────
 async function renderActiveSession(el) {
   if (!activeSessionData) {
@@ -655,6 +833,17 @@ function showTrackingView(el) {
     <button id="record-btn" class="btn-red" style="width:100%;font-size:1rem;padding:0.9rem;margin-bottom:0.5rem">+ Record New Buy-in</button>
     <button id="add-player-btn" class="btn-ghost" style="width:100%;font-size:0.95rem;padding:0.8rem;margin-bottom:1rem">+ Add Player to Session</button>
 
+    ${photoStore() ? `
+    <!-- Photos taken during the session -->
+    <div class="card" style="padding:1rem;margin-bottom:1rem">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5rem;margin-bottom:0.75rem">
+        <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2)">Photos</div>
+        <button id="add-photos-btn" class="btn-ghost" style="padding:0.4rem 0.8rem;font-size:0.8rem">+ Add Photos</button>
+      </div>
+      <input type="file" id="photo-input" accept="image/*" multiple style="display:none" />
+      <div id="live-photos">${livePhotosHTML()}</div>
+    </div>` : ''}
+
     <!-- History of recorded buy-ins -->
     <div class="card" style="padding:1rem;margin-bottom:1rem">
       <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">Buy-in History</div>
@@ -694,6 +883,31 @@ function showTrackingView(el) {
   document.getElementById('record-btn').addEventListener('click', () => showRecordBuyinDialog(buyins));
 
   document.getElementById('add-player-btn').addEventListener('click', () => showAddPlayerDialog(buyins));
+
+  if (photoStore()) {
+    const photoInput = document.getElementById('photo-input');
+    document.getElementById('add-photos-btn').addEventListener('click', () => photoInput.click());
+    photoInput.addEventListener('change', async () => {
+      const files = [...photoInput.files];
+      photoInput.value = '';
+      if (!files.length) return;
+      // Looked up by id each time: the view may re-render while photos upload.
+      const setBtn = (text, busy) => { const b = document.getElementById('add-photos-btn'); if (b) { b.textContent = text; b.disabled = busy; } };
+      const { uploaded, lastError } = await uploadSessionPhotos(s.id, files, (n, total) => setBtn(`Uploading ${n}/${total}…`, true));
+      setBtn('+ Add Photos', false);
+      if (lastError) showToast(uploaded ? `${files.length - uploaded} of ${files.length} photos failed to upload` : 'Upload failed: ' + lastError.message, '#e53e3e');
+      else showToast(uploaded === 1 ? 'Photo added 📸' : `${uploaded} photos added 📸`);
+      await refreshLivePhotos();
+    });
+    document.getElementById('live-photos').addEventListener('click', e => {
+      if (e.target.closest('[data-photo-toggle]')) {
+        livePhotos.open = !livePhotos.open;
+        document.getElementById('live-photos').innerHTML = livePhotosHTML();
+      } else if (e.target.dataset.photoIndex !== undefined)
+        openPhotoViewer(livePhotos.list, Number(e.target.dataset.photoIndex), { onDelete: refreshLivePhotos });
+    });
+    refreshLivePhotos();
+  }
 
   // Undo buy-in log entries
   document.querySelectorAll('[data-undo-log]').forEach(btn => {
@@ -750,7 +964,7 @@ function showTrackingView(el) {
     const btn=document.getElementById('cancel-btn');
     btn.outerHTML=`
       <div id="cancel-confirm" class="card" style="padding:1rem;display:flex;flex-direction:column;gap:0.75rem">
-        <span style="font-size:0.8rem;color:var(--text2)">Cancel session? All tracking lost. Enter the session passcode to confirm.</span>
+        <span style="font-size:0.8rem;color:var(--text2)">Cancel session? All tracking and photos lost. Enter the session passcode to confirm.</span>
         <input type="password" id="cancel-passcode" inputmode="numeric" maxlength="4" placeholder="••••"
           class="inp" style="display:block;width:100%;padding:0.75rem;font-size:1.25rem;letter-spacing:0.3em;font-weight:700;text-align:center;color:var(--text)" />
         <p id="cancel-pass-err" style="display:none;color:var(--neg);font-size:0.8rem;margin:0">Wrong passcode, try again.</p>
@@ -768,6 +982,7 @@ function showTrackingView(el) {
         return;
       }
       await db.from('active_session').delete().eq('id',activeSessionData.id);
+      await removeSessionPhotos(activeSessionData.id);
       activeSessionData=null;
       sessionStorage.removeItem('pending_event_id');
       navigate('new-session');
@@ -1049,8 +1264,14 @@ function showEndView(el) {
     const btn=document.getElementById('save-end-btn');
     btn.textContent='Saving…'; btn.disabled=true;
 
-    const {data:session,error:sErr}=await db.from('sessions').insert({date:activeSessionData.date,started_at:activeSessionData.created_at,ended_at:new Date().toISOString()}).select().single();
-    if (sErr) { showToast('Error saving','#e53e3e'); btn.textContent='Save Session'; btn.disabled=false; return; }
+    // Keep the live session's id so its photos stay attached, and its passcode so History can ask for it.
+    const session={id:activeSessionData.id};
+    const row={id:session.id,date:activeSessionData.date,started_at:activeSessionData.created_at,ended_at:new Date().toISOString()};
+    let {error:sErr}=await db.from('sessions').insert({...row,passcode:activeSessionData.passcode});
+    // PGRST204: the sessions table has no passcode column yet, so save without it rather than fail.
+    if (sErr?.code==='PGRST204') ({error:sErr}=await db.from('sessions').insert(row));
+    // 23505: an earlier attempt already saved this row, so carry on with the results.
+    if (sErr && sErr.code!=='23505') { showToast('Error saving','#e53e3e'); btn.textContent='Save Session'; btn.disabled=false; return; }
     const {error:rErr}=await db.from('session_results').insert(results.map(r=>({session_id:session.id,...r})));
     if (rErr) { showToast('Error saving results','#e53e3e'); btn.textContent='Save Session'; btn.disabled=false; return; }
 
@@ -1075,6 +1296,18 @@ async function renderHistory(el) {
     <h2 style="font-size:1.5rem;font-weight:900;margin-bottom:1rem">Session History</h2>
     <div id="history-body"><p style="color:var(--text2);text-align:center;padding:3rem 0">Loading…</p></div>
   </div>`;
+  openHistoryPhotos.clear();
+  document.getElementById('history-body').addEventListener('click', e => {
+    const box = e.target.closest('[data-photo-session]');
+    if (!box) return;
+    const id = box.dataset.photoSession;
+    if (e.target.closest('[data-photo-toggle]')) {
+      if (openHistoryPhotos.has(id)) openHistoryPhotos.delete(id); else openHistoryPhotos.add(id);
+      box.innerHTML = historyPhotosHTML(id);
+    } else if (e.target.dataset.photoIndex !== undefined)
+      openPhotoViewer(historyPhotos[id] || [], Number(e.target.dataset.photoIndex),
+        box.dataset.photoEditable ? { onDelete: () => refreshHistoryPhotos(id) } : {});
+  });
   await loadHistory();
 }
 
@@ -1088,6 +1321,7 @@ async function loadHistory() {
   }
   body.innerHTML=sessions.map(s=>renderSessionCard(s)).join('');
   bindHistoryActions();
+  loadHistoryPhotos(sessions);
 }
 
 // Sessions freeze 24h after they were created — no more edits or deletes.
@@ -1099,16 +1333,10 @@ function isSessionLocked(s) {
   return Date.now() - ref.getTime() > LOCK_WINDOW_MS;
 }
 
-function renderSessionCard(s, editing=false) {
+function renderSessionCard(s) {
   const results=(s.session_results||[]).sort((a,b)=>b.buyins-a.buyins);
   const rows=results.map(r=>{
     const v=Number(r.buyins), rs=v*BUYIN_VALUE, sign=rs>0?'+':rs<0?'-':'';
-    if (editing) return `<div style="display:flex;align-items:center;gap:0.5rem;padding:0.375rem 0">
-      <div style="width:5rem;flex-shrink:0;font-size:0.875rem;font-weight:600;color:var(--text)">${r.player_name}</div>
-      <input type="text" inputmode="decimal" class="edit-input inp" style="flex:1;min-width:0;padding:0.5rem;font-size:0.875rem;font-weight:700;text-align:center"
-        data-result-id="${r.id}" value="${r.buyins}" />
-      <div style="width:4.5rem;text-align:right;font-size:0.75rem;color:var(--text2)">${v.toFixed(2)} bi</div>
-    </div>`;
     return `<div style="display:flex;align-items:center;justify-content:space-between;padding:0.375rem 0">
       <span style="font-size:0.875rem;color:var(--text)">${r.player_name}</span>
       <div style="text-align:right">
@@ -1122,14 +1350,9 @@ function renderSessionCard(s, editing=false) {
   const btns=locked?`
     <div style="display:flex;align-items:center;justify-content:center;gap:0.4rem;margin-top:0.75rem;font-size:0.8rem;color:var(--text2)">
       🔒 <span>Locked — 24h edit window has passed</span>
-    </div>`:editing?`
-    <div style="display:flex;gap:0.5rem;margin-top:0.75rem">
-      <button data-save-session="${s.id}" class="btn-red" style="flex:1;padding:0.625rem;font-size:0.875rem">Save</button>
-      <button data-cancel-session="${s.id}" class="btn-ghost" style="flex:1;padding:0.625rem;font-size:0.875rem">Cancel</button>
     </div>`:`
-    <div id="btns-${s.id}" style="display:flex;gap:0.5rem;margin-top:0.75rem">
-      <button data-edit-session="${s.id}" class="btn-ghost" style="flex:1;padding:0.625rem;font-size:0.875rem">Edit</button>
-      <button data-delete-session="${s.id}" style="padding:0.625rem 1rem;font-size:0.875rem;font-weight:600;border-radius:0.75rem;border:1px solid rgba(248,81,73,0.25);color:var(--neg);background:rgba(248,81,73,0.05);cursor:pointer;transition:all 0.15s">Delete</button>
+    <div id="btns-${s.id}" style="display:flex;justify-content:flex-end;gap:0.5rem;margin-top:0.75rem">
+      <button data-delete-session="${s.id}" data-has-passcode="${s.passcode?'1':''}" style="padding:0.625rem 1rem;font-size:0.875rem;font-weight:600;border-radius:0.75rem;border:1px solid rgba(248,81,73,0.25);color:var(--neg);background:rgba(248,81,73,0.05);cursor:pointer;transition:all 0.15s">Delete</button>
     </div>`;
 
   return `<div id="session-card-${s.id}" class="card" style="padding:1rem;margin-bottom:0.75rem">
@@ -1138,61 +1361,54 @@ function renderSessionCard(s, editing=false) {
       <div style="font-size:0.75rem;color:var(--text2)">${results.length} players</div>
     </div>
     <div style="border-top:1px solid var(--border)">${rows}</div>
+    <div id="photos-${s.id}" data-photo-session="${s.id}" data-photo-editable="${locked?'':'1'}">${historyPhotosHTML(s.id)}</div>
     ${btns}
   </div>`;
 }
 
 function bindHistoryActions() {
-  document.querySelectorAll('[data-edit-session]').forEach(btn=>{
-    btn.addEventListener('click', async ()=>{
-      const id=btn.dataset.editSession;
-      const {data:s}=await db.from('sessions').select('*, session_results(*)').eq('id',id).single();
-      document.getElementById('session-card-'+id).outerHTML=renderSessionCard(s,true);
-      bindHistoryActions();
-    });
-  });
-  document.querySelectorAll('[data-cancel-session]').forEach(btn=>{
-    btn.addEventListener('click', async ()=>{
-      const id=btn.dataset.cancelSession;
-      const {data:s}=await db.from('sessions').select('*, session_results(*)').eq('id',id).single();
-      document.getElementById('session-card-'+id).outerHTML=renderSessionCard(s,false);
-      bindHistoryActions();
-    });
-  });
-  document.querySelectorAll('[data-save-session]').forEach(btn=>{
-    btn.addEventListener('click', async ()=>{
-      const id=btn.dataset.saveSession;
-      const {data:sLock}=await db.from('sessions').select('created_at,date').eq('id',id).single();
-      if (sLock && isSessionLocked(sLock)) { showToast('Session is locked — 24h edit window has passed','#e53e3e'); await loadHistory(); return; }
-      const inputs=document.querySelectorAll(`#session-card-${id} .edit-input`);
-      let sum=0; const updates=[];
-      inputs.forEach(inp=>{ const v=parseFloat(inp.value)||0; sum+=v; updates.push({id:inp.dataset.resultId,buyins:v}); });
-      if (Math.abs(sum)>0.01) { showToast(`Sum must be 0 (now ${sum>0?'+':''}${sum.toFixed(2)})`, '#e53e3e'); return; }
-      btn.textContent='Saving…';
-      for (const u of updates) await db.from('session_results').update({buyins:u.buyins}).eq('id',u.id);
-      showToast('Updated!');
-      await loadHistory();
-    });
-  });
   document.querySelectorAll('[data-delete-session]').forEach(btn=>{
     btn.addEventListener('click', ()=>{
       const id=btn.dataset.deleteSession;
       const btnsDiv=document.getElementById('btns-'+id);
       if (!btnsDiv) return;
-      btnsDiv.innerHTML=`
+      // Sessions saved before passcodes were stored with them only get the plain confirmation.
+      btnsDiv.innerHTML=btn.dataset.hasPasscode?`
+        <div style="flex:1;display:flex;flex-direction:column;gap:0.5rem">
+          <span style="font-size:0.8rem;color:var(--text2)">Delete this session? Enter the session passcode to confirm. This can't be undone.</span>
+          <input type="password" id="delete-pass-${id}" inputmode="numeric" maxlength="4" placeholder="••••"
+            class="inp" style="display:block;width:100%;padding:0.6rem;font-size:1rem;letter-spacing:0.3em;font-weight:700;text-align:center;color:var(--text)" />
+          <p id="delete-pass-err-${id}" style="display:none;color:var(--neg);font-size:0.75rem;margin:0">Wrong passcode.</p>
+          <div style="display:flex;gap:0.5rem">
+            <button data-confirm-delete="${id}" class="btn-red" style="flex:1;padding:0.625rem 1rem;font-size:0.875rem">Yes, Delete</button>
+            <button data-cancel-delete="${id}" class="btn-ghost" style="flex:1;padding:0.625rem 1rem;font-size:0.875rem">Cancel</button>
+          </div>
+        </div>`:`
         <span style="flex:1;font-size:0.8rem;color:var(--text2);display:flex;align-items:center">Sure? This can't be undone.</span>
         <button data-confirm-delete="${id}" class="btn-red" style="padding:0.625rem 1rem;font-size:0.875rem">Yes, Delete</button>
         <button data-cancel-delete="${id}" class="btn-ghost" style="padding:0.625rem 1rem;font-size:0.875rem">Cancel</button>`;
+      document.getElementById('delete-pass-'+id)?.focus();
       btnsDiv.querySelector(`[data-cancel-delete]`).addEventListener('click', async ()=>{
         const {data:s}=await db.from('sessions').select('*, session_results(*)').eq('id',id).single();
-        document.getElementById('session-card-'+id).outerHTML=renderSessionCard(s,false);
+        document.getElementById('session-card-'+id).outerHTML=renderSessionCard(s);
         bindHistoryActions();
       });
       btnsDiv.querySelector(`[data-confirm-delete]`).addEventListener('click', async ()=>{
-        const {data:sLock}=await db.from('sessions').select('created_at,date').eq('id',id).single();
-        if (sLock && isSessionLocked(sLock)) { showToast('Session is locked — 24h edit window has passed','#e53e3e'); await loadHistory(); return; }
+        const {data:sLock,error:lErr}=await db.from('sessions').select('*').eq('id',id).single();
+        if (lErr || !sLock) { showToast('Delete failed: '+(lErr?.message||'session not found'),'#e53e3e'); return; }
+        if (isSessionLocked(sLock)) { showToast('Session is locked — 24h edit window has passed','#e53e3e'); await loadHistory(); return; }
+        if (sLock.passcode) {
+          const passInput=document.getElementById('delete-pass-'+id);
+          if (!passInput) { await loadHistory(); return; }
+          if (passInput.value.trim()!==String(sLock.passcode)) {
+            document.getElementById('delete-pass-err-'+id).style.display='block';
+            passInput.value=''; passInput.focus();
+            return;
+          }
+        }
         const {error}=await db.from('sessions').delete().eq('id',id);
         if (error) { showToast('Delete failed: '+error.message,'#e53e3e'); return; }
+        await removeSessionPhotos(id);
         showToast('Deleted','#6b7280');
         await loadHistory();
       });
