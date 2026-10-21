@@ -66,6 +66,21 @@ const SUPABASE_URL      = 'https://xkdfcqanytgzdqrkjlqg.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhrZGZjcWFueXRnemRxcmtqbHFnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI4MjQ1NzksImV4cCI6MjA5ODQwMDU3OX0.aayD6SKis2gX4Vw14xMcdyBJpKWX3CfePg3VO4Sy0JQ';
 const PASSWORD    = '0000';
 const BUYIN_VALUE = 200;
+function sessionMultiplier(s) {
+  const m = Number(s && s.multiplier);
+  return Number.isFinite(m) && m > 0 ? m : 1;
+}
+function rsFromBuyins(bi, multiplier) {
+  return Number(bi) * BUYIN_VALUE * sessionMultiplier({ multiplier });
+}
+function fmtRsAbs(bi, multiplier) {
+  return '₹' + Math.abs(rsFromBuyins(bi, multiplier)).toLocaleString('en-IN');
+}
+function fmtRsSigned(bi, multiplier) {
+  const rs = rsFromBuyins(bi, multiplier);
+  const s = rs > 0 ? '+' : rs < 0 ? '-' : '';
+  return s + '₹' + Math.abs(rs).toLocaleString('en-IN');
+}
 // The first entry (2026-07-07) is a historical accumulation seed carried over from
 // before tracking began — not a real game. It still counts toward all-time totals
 // (leaderboard + cumulative buy-in graphs) but must be excluded from per-session
@@ -336,6 +351,12 @@ async function checkActiveSession() {
   if (!db) return;
   const { data } = await db.from('active_session').select('*, active_session_buyins(*), active_session_buyin_log(*)').limit(1);
   activeSessionData = (data && data.length > 0) ? data[0] : null;
+  if (activeSessionData && (activeSessionData.multiplier == null)) {
+    try {
+      const cached = JSON.parse(sessionStorage.getItem('poker_active_multiplier') || 'null');
+      if (cached && cached.id === activeSessionData.id) activeSessionData.multiplier = cached.multiplier;
+    } catch (e) {}
+  }
 }
 
 async function init() {
@@ -461,11 +482,16 @@ async function renderLeaderboard(el) {
 
   const includeEvents = localStorage.getItem('lb_include_events') === '1';
 
-  const [{data:results},{data:sessions},{data:eventSessionRows}] = await Promise.all([
+  const [{data:results}, sessRes, {data:eventSessionRows}] = await Promise.all([
     db.from('session_results').select('player_name, buyins, session_id'),
-    db.from('sessions').select('id, date').order('date',{ascending:true}),
+    db.from('sessions').select('id, date, multiplier').order('date',{ascending:true}),
     db.from('event_sessions').select('session_id')
   ]);
+  let sessions = sessRes.data;
+  if (sessRes.error) {
+    const retry = await db.from('sessions').select('id, date').order('date',{ascending:true});
+    sessions = retry.data;
+  }
 
   const eventSessionIds = new Set((eventSessionRows||[]).map(r=>r.session_id));
   const filteredResults = includeEvents ? (results||[]) : (results||[]).filter(r=>!eventSessionIds.has(r.session_id));
@@ -476,10 +502,14 @@ async function renderLeaderboard(el) {
     ? ALL_PLAYER_ROWS.filter(p => p.is_regular !== false).map(p => p.name)
     : PLAYERS;
 
+  const sessionMult = {};
+  (filteredSessions||[]).forEach(s => { sessionMult[s.id] = sessionMultiplier(s); });
+  const weightedBuyins = r => Number(r.buyins) * (sessionMult[r.session_id] ?? sessionMultiplier(r));
+
   const totals = {};
   allNames.forEach(p => totals[p] = 0);
   filteredResults.forEach(r => {
-    if (totals[r.player_name] !== undefined) totals[r.player_name] += Number(r.buyins);
+    if (totals[r.player_name] !== undefined) totals[r.player_name] += weightedBuyins(r);
   });
   const sorted = Object.entries(totals).sort((a,b) => b[1]-a[1]);
   const medals = ['🥇','🥈','🥉'];
@@ -505,7 +535,7 @@ async function renderLeaderboard(el) {
 
   if (!filteredSessions||filteredSessions.length===0) return;
   const bySession = {};
-  filteredResults.forEach(r=>{ if(!bySession[r.session_id]) bySession[r.session_id]={}; bySession[r.session_id][r.player_name]=Number(r.buyins); });
+  filteredResults.forEach(r=>{ if(!bySession[r.session_id]) bySession[r.session_id]={}; bySession[r.session_id][r.player_name]=weightedBuyins(r); });
   const labels = filteredSessions.map(s=>formatDateShort(s.date));
   const chartPlayers = ALL_PLAYER_ROWS.length > 0 ? ALL_PLAYER_ROWS.filter(p=>p.is_regular!==false).map(p=>p.name) : PLAYERS;
   const datasets = chartPlayers.map(player => {
@@ -555,6 +585,25 @@ function renderNewSession(el) {
     </div>
 
     <div class="card" style="padding:1rem;margin-bottom:1rem">
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.25rem">Buy-in Multiplier</label>
+      <p style="font-size:0.75rem;color:var(--text2);margin-bottom:0.75rem">Default 1 keeps 1 buy-in at ₹${BUYIN_VALUE.toLocaleString('en-IN')}. Use 2.5 for special occasions (₹${(BUYIN_VALUE*2.5).toLocaleString('en-IN')} per buy-in).</p>
+      <div style="display:flex;align-items:center;gap:0.75rem">
+        <input type="text" inputmode="decimal" id="session-multiplier" value="1"
+          class="inp" style="flex:1;min-width:0;padding:0.75rem 1rem;font-size:1.25rem;font-weight:700;text-align:center;color:var(--text)" />
+        <div style="font-size:0.8rem;color:var(--text2);flex-shrink:0;white-space:nowrap">1 bi = ₹<span id="mult-preview">${BUYIN_VALUE.toLocaleString('en-IN')}</span></div>
+      </div>
+    </div>
+
+    <div class="card" style="padding:1rem;margin-bottom:1rem">
+      <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.25rem">Link to Event</label>
+      <p style="font-size:0.75rem;color:var(--text2);margin-bottom:0.75rem">Pick an active event to attach this session when you save it. Leave as None for a regular game.</p>
+      <select id="session-event" class="inp" style="display:block;width:100%;padding:0.75rem 1rem;font-size:1rem;font-weight:600;color:var(--text)">
+        <option value="">None — regular session</option>
+      </select>
+      <p id="event-link-hint" style="font-size:0.75rem;color:var(--text2);margin:0.6rem 0 0">Not linked to an event.</p>
+    </div>
+
+    <div class="card" style="padding:1rem;margin-bottom:1rem">
       <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.75rem">Who's playing?</label>
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:0.5rem" id="player-select">
         ${PLAYERS.map(p=>`<button data-player="${p}" class="player-pill" style="padding:0.75rem 0.5rem;font-size:0.875rem;text-align:center">${p}</button>`).join('')}
@@ -569,8 +618,40 @@ function renderNewSession(el) {
 
 function bindNewSessionStart() {
   const selected = new Set();
+  const multInp = document.getElementById('session-multiplier');
+  function refreshMultPreview() {
+    const m = parseFloat(multInp.value);
+    const v = Number.isFinite(m) && m > 0 ? m : 1;
+    document.getElementById('mult-preview').textContent = (BUYIN_VALUE * v).toLocaleString('en-IN');
+  }
+  multInp.addEventListener('input', refreshMultPreview);
 
-  document.querySelectorAll('.player-pill').forEach(btn => {
+  const eventSel = document.getElementById('session-event');
+  const eventHint = document.getElementById('event-link-hint');
+  function refreshEventHint() {
+    if (!eventSel || !eventHint) return;
+    if (eventSel.value) {
+      const name = eventSel.selectedOptions[0]?.textContent || 'this event';
+      eventHint.textContent = `This session will be added to ${name} when you save it.`;
+    } else {
+      eventHint.textContent = 'Not linked to an event.';
+    }
+  }
+  eventSel.addEventListener('change', refreshEventHint);
+  (async () => {
+    if (!db) return;
+    const {data:events} = await db.from('events').select('id,name,status').eq('status','active').order('created_at',{ascending:false});
+    (events||[]).forEach(ev => {
+      const opt = document.createElement('option');
+      opt.value = ev.id;
+      opt.textContent = ev.name;
+      eventSel.appendChild(opt);
+    });
+    eventSel.value = '';
+    refreshEventHint();
+  })();
+
+  document.querySelectorAll('#player-select .player-pill').forEach(btn => {
     btn.addEventListener('click', () => {
       const p=btn.dataset.player;
       if (selected.has(p)) { selected.delete(p); btn.classList.remove('selected'); }
@@ -585,13 +666,22 @@ function bindNewSessionStart() {
     if (!date) { showToast('Pick a date','#e53e3e'); return; }
     const passcode=document.getElementById('session-passcode').value.trim();
     if (!/^\d{4}$/.test(passcode)) { showToast('Set a 4-digit passcode','#e53e3e'); return; }
+    const multiplier=parseFloat(document.getElementById('session-multiplier').value);
+    if (!(multiplier>0)) { showToast('Multiplier must be greater than 0','#e53e3e'); return; }
     if (!db)   { showToast('Supabase not configured','#e53e3e'); return; }
+
+    const eventId=document.getElementById('session-event')?.value || '';
+    const eventName=eventId ? (document.getElementById('session-event').selectedOptions[0]?.textContent || '') : '';
+    if (eventId) sessionStorage.setItem('pending_event_id', eventId);
+    else sessionStorage.removeItem('pending_event_id');
 
     const btn=document.getElementById('start-btn');
     btn.textContent='Starting…'; btn.disabled=true;
 
-    const {data:session,error:sErr}=await db.from('active_session').insert({date,passcode}).select().single();
+    let {data:session,error:sErr}=await db.from('active_session').insert({date,passcode,multiplier}).select().single();
+    if (sErr?.code==='PGRST204') ({data:session,error:sErr}=await db.from('active_session').insert({date,passcode}).select().single());
     if (sErr) { showToast('Error starting session','#e53e3e'); btn.textContent='Start Session →'; btn.disabled=false; return; }
+    if (session) session.multiplier = multiplier;
 
     // Everyone starts with 1 buy-in; further buy-ins are recorded during the session.
     const rows=[...selected].map(p=>({
@@ -604,6 +694,12 @@ function bindNewSessionStart() {
 
     const {data:full}=await db.from('active_session').select('*, active_session_buyins(*), active_session_buyin_log(*)').eq('id',session.id).single();
     activeSessionData=full;
+    if (activeSessionData) {
+      activeSessionData.multiplier = multiplier;
+      sessionStorage.setItem('poker_active_multiplier', JSON.stringify({id:activeSessionData.id, multiplier}));
+      if (eventId) sessionStorage.setItem('poker_active_event', JSON.stringify({id:activeSessionData.id, eventId, eventName}));
+      else sessionStorage.removeItem('poker_active_event');
+    }
     navigate('active-session');
   });
 }
@@ -801,6 +897,7 @@ function showTrackingView(el) {
   // Timestamped ledger of each recorded buy-in, newest first.
   const log=(s.active_session_buyin_log||[]).slice().sort((a,b)=>(b.created_at||'').localeCompare(a.created_at||''));
   const totalBi=buyins.reduce((a,b)=>a+b.buyins,0);
+  const m=sessionMultiplier(s);
 
   el.innerHTML=`
   <div style="max-width:672px;margin:0 auto;padding:1.5rem 1rem">
@@ -811,13 +908,13 @@ function showTrackingView(el) {
         <span style="font-size:0.75rem;color:var(--green);font-weight:600">LIVE</span>
       </div>
     </div>
-    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">${formatDate(s.date)}</p>
+    <p style="color:var(--text2);font-size:0.875rem;margin-bottom:1.25rem">${formatDate(s.date)}${m!==1?` · ×${m} · ₹${(BUYIN_VALUE*m).toLocaleString('en-IN')} per buy-in`:''}${(()=>{ try { const ev=JSON.parse(sessionStorage.getItem('poker_active_event')||'null'); return (ev && ev.id===s.id && ev.eventName) ? ` · 🎯 ${ev.eventName}` : ''; } catch(e){ return ''; } })()}</p>
 
     <!-- Overall committed buy-ins -->
     <div class="card" style="padding:1rem;margin-bottom:1rem">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
         <div style="font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2)">Total Buy-ins</div>
-        <div style="font-size:0.75rem;color:var(--text2)">${totalBi} bi · ₹${(totalBi*BUYIN_VALUE).toLocaleString('en-IN')}</div>
+        <div style="font-size:0.75rem;color:var(--text2)">${totalBi} bi · ${fmtRsAbs(totalBi, m)}</div>
       </div>
       <div style="display:flex;flex-direction:column;gap:0.75rem">
         ${buyins.map(b=>`
@@ -825,7 +922,7 @@ function showTrackingView(el) {
             <div style="width:0.5rem;height:0.5rem;border-radius:50%;background:${PLAYER_COLORS[b.player_name]||'#888'};flex-shrink:0"></div>
             <div style="flex:1;font-weight:600;color:var(--text)">${b.player_name}</div>
             <div style="font-weight:900;font-size:1.1rem;color:var(--text)">${b.buyins} <span style="font-size:0.7rem;font-weight:600;color:var(--text2)">bi</span></div>
-            <div style="font-size:0.8rem;color:var(--text2);width:4rem;text-align:right;flex-shrink:0">₹${(b.buyins*BUYIN_VALUE).toLocaleString('en-IN')}</div>
+            <div style="font-size:0.8rem;color:var(--text2);min-width:4rem;text-align:right;flex-shrink:0">${fmtRsAbs(b.buyins, m)}</div>
           </div>`).join('')}
       </div>
     </div>
@@ -858,7 +955,7 @@ function showTrackingView(el) {
                   <div style="font-weight:600;color:var(--text)">${e.player_name} <span style="color:var(--green);font-weight:700">+${e.amount}</span> <span style="font-size:0.7rem;color:var(--text2)">bi</span></div>
                   <div style="font-size:0.72rem;color:var(--text2)">${formatTime(e.created_at)}</div>
                 </div>
-                <div style="font-size:0.8rem;color:var(--text2);flex-shrink:0">₹${(e.amount*BUYIN_VALUE).toLocaleString('en-IN')}</div>
+                <div style="font-size:0.8rem;color:var(--text2);flex-shrink:0">${fmtRsAbs(e.amount, m)}</div>
                 <button data-undo-log="${e.id}" data-undo-player="${e.player_name}" data-undo-amount="${e.amount}"
                   class="btn-ghost" style="padding:0.3rem 0.6rem;font-size:0.75rem;flex-shrink:0;color:var(--neg);border-color:rgba(248,81,73,0.25)">✕</button>
               </div>
@@ -985,6 +1082,8 @@ function showTrackingView(el) {
       await removeSessionPhotos(activeSessionData.id);
       activeSessionData=null;
       sessionStorage.removeItem('pending_event_id');
+      sessionStorage.removeItem('poker_active_multiplier');
+      sessionStorage.removeItem('poker_active_event');
       navigate('new-session');
     });
   });
@@ -994,6 +1093,7 @@ function showTrackingView(el) {
 // session passcode. On success it appends a timestamped log row and bumps the
 // player's running total, then refreshes the tracking view.
 function showRecordBuyinDialog(buyins) {
+  const m=sessionMultiplier(activeSessionData);
   const overlay=document.createElement('div');
   overlay.style.cssText='position:fixed;inset:0;z-index:9998;background:rgba(0,0,0,0.6);display:flex;align-items:flex-end;justify-content:center;padding:0';
   overlay.innerHTML=`
@@ -1013,7 +1113,7 @@ function showRecordBuyinDialog(buyins) {
         <button type="button" id="rec-minus" class="btn-ghost" style="width:2.75rem;height:2.75rem;font-size:1.3rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0">−</button>
         <div id="rec-qty" style="flex:1;text-align:center;font-weight:900;font-size:1.5rem;color:var(--text)">1</div>
         <button type="button" id="rec-plus" class="btn-ghost" style="width:2.75rem;height:2.75rem;font-size:1.3rem;font-weight:900;display:flex;align-items:center;justify-content:center;padding:0;flex-shrink:0">+</button>
-        <div style="font-size:0.85rem;color:var(--text2);width:4.5rem;text-align:right;flex-shrink:0">₹<span id="rec-rs">${BUYIN_VALUE}</span></div>
+        <div style="font-size:0.85rem;color:var(--text2);min-width:4.5rem;text-align:right;flex-shrink:0">₹<span id="rec-rs">${(BUYIN_VALUE*m).toLocaleString('en-IN')}</span></div>
       </div>
 
       <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Session Passcode</label>
@@ -1027,7 +1127,7 @@ function showRecordBuyinDialog(buyins) {
 
   let selectedPlayer=null, qty=1;
   function close(){ overlay.remove(); }
-  function refreshQty(){ document.getElementById('rec-rs').textContent=(qty*BUYIN_VALUE).toLocaleString('en-IN'); document.getElementById('rec-qty').textContent=qty; }
+  function refreshQty(){ document.getElementById('rec-rs').textContent=rsFromBuyins(qty, m).toLocaleString('en-IN'); document.getElementById('rec-qty').textContent=qty; }
 
   overlay.addEventListener('click', e=>{ if(e.target===overlay) close(); });
   document.getElementById('rec-close').addEventListener('click', close);
@@ -1080,6 +1180,7 @@ function showRecordBuyinDialog(buyins) {
 // with exactly 1 buy-in), a late joiner can start with any positive buy-in count.
 // Offers only roster players not already in the session, and gates on the passcode.
 function showAddPlayerDialog(buyins) {
+  const m=sessionMultiplier(activeSessionData);
   const present=new Set(buyins.map(b=>b.player_name));
   const roster=(ALL_PLAYER_ROWS.length>0?ALL_PLAYER_ROWS.filter(p=>p.active).map(p=>p.name):PLAYERS);
   const available=roster.filter(p=>!present.has(p));
@@ -1104,7 +1205,7 @@ function showAddPlayerDialog(buyins) {
       <div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:1rem">
         <input type="text" inputmode="decimal" id="ap-qty" value="1"
           class="inp" style="flex:1;min-width:0;padding:0.75rem;font-size:1.2rem;font-weight:700;text-align:center;color:var(--text)" />
-        <div style="font-size:0.85rem;color:var(--text2);width:5.5rem;text-align:right;flex-shrink:0">₹<span id="ap-rs">${BUYIN_VALUE}</span></div>
+        <div style="font-size:0.85rem;color:var(--text2);min-width:5.5rem;text-align:right;flex-shrink:0">₹<span id="ap-rs">${(BUYIN_VALUE*m).toLocaleString('en-IN')}</span></div>
       </div>
 
       <label style="display:block;font-size:0.7rem;font-weight:700;text-transform:uppercase;letter-spacing:0.05em;color:var(--text2);margin-bottom:0.5rem">Session Passcode</label>
@@ -1120,7 +1221,7 @@ function showAddPlayerDialog(buyins) {
   function close(){ overlay.remove(); }
   function refreshRs(){
     const q=parseFloat(document.getElementById('ap-qty').value)||0;
-    document.getElementById('ap-rs').textContent=(q*BUYIN_VALUE).toLocaleString('en-IN');
+    document.getElementById('ap-rs').textContent=rsFromBuyins(q, m).toLocaleString('en-IN');
   }
 
   overlay.addEventListener('click', e=>{ if(e.target===overlay) close(); });
@@ -1266,9 +1367,12 @@ function showEndView(el) {
 
     // Keep the live session's id so its photos stay attached, and its passcode so History can ask for it.
     const session={id:activeSessionData.id};
+    const multiplier=sessionMultiplier(activeSessionData);
     const row={id:session.id,date:activeSessionData.date,started_at:activeSessionData.created_at,ended_at:new Date().toISOString()};
-    let {error:sErr}=await db.from('sessions').insert({...row,passcode:activeSessionData.passcode});
-    // PGRST204: the sessions table has no passcode column yet, so save without it rather than fail.
+    let {error:sErr}=await db.from('sessions').insert({...row,passcode:activeSessionData.passcode,multiplier});
+    // PGRST204: sessions may not have multiplier and/or passcode yet, so drop unknown columns rather than fail.
+    if (sErr?.code==='PGRST204') ({error:sErr}=await db.from('sessions').insert({...row,passcode:activeSessionData.passcode}));
+    if (sErr?.code==='PGRST204') ({error:sErr}=await db.from('sessions').insert({...row,multiplier}));
     if (sErr?.code==='PGRST204') ({error:sErr}=await db.from('sessions').insert(row));
     // 23505: an earlier attempt already saved this row, so carry on with the results.
     if (sErr && sErr.code!=='23505') { showToast('Error saving','#e53e3e'); btn.textContent='Save Session'; btn.disabled=false; return; }
@@ -1277,14 +1381,22 @@ function showEndView(el) {
 
     await db.from('active_session').delete().eq('id',activeSessionData.id);
 
-    // Link session to event if one was active when this session started
-    const pendingEventId = sessionStorage.getItem('pending_event_id');
+    // Link session to event if one was chosen when this session started
+    let pendingEventId = sessionStorage.getItem('pending_event_id');
+    if (!pendingEventId) {
+      try {
+        const ev = JSON.parse(sessionStorage.getItem('poker_active_event')||'null');
+        if (ev && ev.id === session.id) pendingEventId = ev.eventId;
+      } catch (e) {}
+    }
     if (pendingEventId) {
       await db.from('event_sessions').insert({event_id:pendingEventId, session_id:session.id});
       sessionStorage.removeItem('pending_event_id');
     }
 
     activeSessionData=null;
+    sessionStorage.removeItem('poker_active_multiplier');
+    sessionStorage.removeItem('poker_active_event');
     showToast('Session saved! 🎉');
     setTimeout(()=>navigate('history'),800);
   });
@@ -1335,13 +1447,14 @@ function isSessionLocked(s) {
 
 function renderSessionCard(s) {
   const results=(s.session_results||[]).sort((a,b)=>b.buyins-a.buyins);
+  const m=sessionMultiplier(s);
   const rows=results.map(r=>{
-    const v=Number(r.buyins), rs=v*BUYIN_VALUE, sign=rs>0?'+':rs<0?'-':'';
+    const v=Number(r.buyins);
     return `<div style="display:flex;align-items:center;justify-content:space-between;padding:0.375rem 0">
       <span style="font-size:0.875rem;color:var(--text)">${r.player_name}</span>
       <div style="text-align:right">
         <span class="${colorCls(v)}" style="font-size:0.875rem;font-weight:700">${v>0?'+':''}${v.toFixed(2)} bi</span>
-        <span style="font-size:0.75rem;color:var(--text2);margin-left:0.5rem">${sign}₹${Math.abs(rs).toLocaleString('en-IN')}</span>
+        <span style="font-size:0.75rem;color:var(--text2);margin-left:0.5rem">${fmtRsSigned(v, m)}</span>
       </div>
     </div>`;
   }).join('');
@@ -1358,7 +1471,7 @@ function renderSessionCard(s) {
   return `<div id="session-card-${s.id}" class="card" style="padding:1rem;margin-bottom:0.75rem">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.75rem">
       <div style="font-weight:900;color:var(--text)">${formatDate(s.date)}</div>
-      <div style="font-size:0.75rem;color:var(--text2)">${results.length} players</div>
+      <div style="font-size:0.75rem;color:var(--text2)">${results.length} players${m!==1?` · ×${m}`:''}</div>
     </div>
     <div style="border-top:1px solid var(--border)">${rows}</div>
     <div id="photos-${s.id}" data-photo-session="${s.id}" data-photo-editable="${locked?'':'1'}">${historyPhotosHTML(s.id)}</div>
@@ -1433,10 +1546,15 @@ async function renderProfile(el, player) {
 
   if (!db) { document.getElementById('profile-body').innerHTML=notConfiguredMsg('profile'); return; }
 
-  const [{data:playerResults},{data:allSessions}]=await Promise.all([
+  const [{data:playerResults}, sessRes]=await Promise.all([
     db.from('session_results').select('buyins,session_id').eq('player_name',player),
-    db.from('sessions').select('id,date,started_at,ended_at').order('date',{ascending:true})
+    db.from('sessions').select('id,date,started_at,ended_at,multiplier').order('date',{ascending:true})
   ]);
+  let allSessions = sessRes.data;
+  if (sessRes.error) {
+    const retry = await db.from('sessions').select('id,date,started_at,ended_at').order('date',{ascending:true});
+    allSessions = retry.data;
+  }
 
   if (!playerResults||playerResults.length===0) {
     document.getElementById('profile-body').innerHTML=`<p style="color:var(--text2);text-align:center;padding:3rem 0">${player} hasn't played any sessions yet.</p>`;
@@ -1445,7 +1563,15 @@ async function renderProfile(el, player) {
 
   const sessionMap={}; (allSessions||[]).forEach(s=>sessionMap[s.id]=s);
   const sessions=playerResults
-    .map(r=>({buyins:Number(r.buyins),date:sessionMap[r.session_id]?.date||'',started_at:sessionMap[r.session_id]?.started_at,ended_at:sessionMap[r.session_id]?.ended_at}))
+    .map(r=>{
+      const sess=sessionMap[r.session_id];
+      return {
+        buyins: Number(r.buyins) * sessionMultiplier(sess),
+        date: sess?.date||'',
+        started_at: sess?.started_at,
+        ended_at: sess?.ended_at
+      };
+    })
     .filter(r=>r.date)
     .sort((a,b)=>a.date.localeCompare(b.date));
 
